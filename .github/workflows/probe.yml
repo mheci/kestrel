@@ -7,13 +7,13 @@ jobs:
     steps:
       - name: Runner facts
         run: |
-          set -x
+          set -x; set +e
           nproc; free -g; lscpu | grep -E 'Model name|Flags' | cut -c1-200
           df -h / /mnt 2>/dev/null || df -h
           ls -la /dev/kvm || echo "no /dev/kvm"
           grep -c -E 'vmx|svm' /proc/cpuinfo || true
           uname -r; cat /etc/os-release | head -3
-          which podman buildah skopeo docker qemu-system-x86_64 qemu-img zstd ccache sbsign setfattr 2>&1
+          for t in podman buildah skopeo docker qemu-system-x86_64 qemu-img zstd ccache sbsign setfattr; do printf "%s: %s\n" "$t" "$(command -v $t || echo missing)"; done
           podman --version; skopeo --version; docker --version
           sudo podman info --format '{{.Store.GraphRoot}} {{.Store.GraphDriverName}}'
           cat /proc/sys/fs/binfmt_misc/status || true
