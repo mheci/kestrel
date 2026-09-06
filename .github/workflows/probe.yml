@@ -31,13 +31,14 @@ jobs:
           podman run --rm quay.io/fedora/fedora:44 bash -c '
             dnf -q -y install --repofrompath terra,https://repos.fyralabs.com/terra44 --setopt=terra.gpgcheck=0 terra-release >/dev/null 2>&1
             dnf -q -y install --enablerepo=terra terra-release-nvidia >/dev/null 2>&1
-            ls /etc/yum.repos.d/
-            dnf -q download --enablerepo=terra-nvidia --destdir=/tmp/rp nvidia-kmod-common nvidia-driver akmod-nvidia kmod-nvidia 2>&1 | tail -3
+            ls /etc/yum.repos.d/; cat /etc/yum.repos.d/terra-nvidia.repo
+            dnf -y download --enablerepo=terra-nvidia --setopt=terra-nvidia.gpgcheck=0 --destdir=/tmp/rp nvidia-kmod-common nvidia-driver akmod-nvidia kmod-nvidia 2>&1 | tail -5; ls /tmp/rp
             for f in /tmp/rp/*.rpm; do echo "=== $f"; rpm -qp --scripts "$f" 2>/dev/null | head -80; echo "--- requires"; rpm -qpR "$f" | grep -v -E "^(lib|rtld|/|rpmlib|glibc)" ; done
             echo "=== nvidia-kmod-common files"; rpm -qpl /tmp/rp/nvidia-kmod-common*.rpm | grep -v firmware
             rpm2cpio /tmp/rp/nvidia-kmod-common*.rpm | cpio -i --to-stdout ./usr/lib/dracut/dracut.conf.d/99-nvidia.conf ./usr/lib/modprobe.d/nvidia.conf 2>/dev/null
           '
       - name: Rootless podman and kvm
+        if: always()
         run: |
           set -x; set +e
           podman info --format "{{.Host.Security.Rootless}} {{.Store.GraphDriverName}} {{.Store.GraphRoot}}"
