@@ -1,0 +1,41 @@
+name: probe
+on:
+  workflow_dispatch:
+jobs:
+  runner:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Runner facts
+        run: |
+          set -x
+          nproc; free -g; lscpu | grep -E 'Model name|Flags' | cut -c1-200
+          df -h / /mnt 2>/dev/null || df -h
+          ls -la /dev/kvm || echo "no /dev/kvm"
+          grep -c -E 'vmx|svm' /proc/cpuinfo || true
+          uname -r; cat /etc/os-release | head -3
+          which podman buildah skopeo docker qemu-system-x86_64 qemu-img zstd ccache sbsign setfattr 2>&1
+          podman --version; skopeo --version; docker --version
+          sudo podman info --format '{{.Store.GraphRoot}} {{.Store.GraphDriverName}}'
+          cat /proc/sys/fs/binfmt_misc/status || true
+          sudo losetup -f
+          du -sh /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache /usr/lib/jvm 2>/dev/null || true
+      - name: KVM enable
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm || true
+          ls -la /dev/kvm || true
+      - name: Fedora builder speed and package versions
+        run: |
+          time sudo podman pull quay.io/fedora/fedora:44
+          time sudo podman run --rm quay.io/fedora/fedora:44 bash -c 'dnf -q -y install clang lld llvm dwarves ccache sbsigntools kmod elfutils-libelf-devel openssl-devel bc bison flex perl-core python3 zstd xz rpm-build sbsigntools >/dev/null 2>&1; rpm -q clang lld llvm dwarves ccache sbsigntools kmod rpm-build; clang --version | head -1; ld.lld --version | head -1; pahole --version'
+      - name: Time apt qemu install
+        run: |
+          time (sudo apt-get update -qq && sudo apt-get install -y -qq qemu-system-x86 ovmf >/dev/null)
+          qemu-system-x86_64 --version | head -1; ls /usr/share/OVMF/
+      - name: kinoite-main label and pull time
+        run: |
+          skopeo inspect docker://ghcr.io/ublue-os/kinoite-main:latest | jq -r '.Labels["org.opencontainers.image.version"], .Digest, (.LayersData|length)'
+          time sudo podman pull ghcr.io/ublue-os/kinoite-main:latest
+          sudo podman image inspect ghcr.io/ublue-os/kinoite-main:latest --format '{{.Size}}'
+          sudo podman run --rm ghcr.io/ublue-os/kinoite-main:latest bash -c 'rpm -q kernel-core bootc dnf5 dracut ostree selinux-policy-targeted kernel-devel akmods 2>&1; ls /usr/lib/modules; ls /usr/lib/modules/*/; cat /usr/lib/dracut/dracut.conf.d/* 2>/dev/null | head -40; ls /usr/lib/kernel/install.d/; ls /boot; bootc --version; dnf5 --version | head -1; cat /etc/dnf/dnf.conf; ls /etc/dnf/libdnf5.conf.d/ 2>&1; rpm -qa | grep -i -E "kernel|kmod" | sort'
+          df -h / /mnt
