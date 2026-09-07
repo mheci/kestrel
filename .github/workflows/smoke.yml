@@ -1,0 +1,84 @@
+# Fast check of everything before the long compile: resolve, builder image,
+# tarball verification, config, olddefconfig, kernelrelease, and a short
+# compile slice through the same stage action the channel workflow uses.
+# Exit 75 from the slice (budget spent) counts as success here.
+name: smoke
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: channel
+        required: true
+        default: stable
+        type: choice
+        options: [stable, lts]
+      compile-seconds:
+        description: seconds of compile to attempt
+        required: false
+        default: "240"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve
+        id: r
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/resolve.sh "${{ inputs.channel }}" want
+      - name: Builder image
+        run: |
+          podman build -q --build-arg FEDORA_RELEASE=${{ steps.r.outputs.fedora_release }} \
+            -t localhost/kestrel-builder:smoke -f containers/Containerfile.builder containers/
+          podman run --rm localhost/kestrel-builder:smoke bash -c 'clang --version | head -1; ld.lld --version; pahole --version; rpm --version; rpmsign --version; ccache --version | head -1'
+      - name: Prepare and short compile
+        env:
+          BUDGET: ${{ inputs.compile-seconds }}
+        run: |
+          set -euo pipefail
+          mkdir -p work ccache
+          run_in() {
+            podman run --rm --security-opt label=disable \
+              -v "$PWD:/repo" -v "$PWD/work:/work" -v "$PWD/ccache:/ccache" \
+              -e KESTREL_ROOT=/repo -e CCACHE_DIR=/ccache -e GITHUB_ACTIONS=1 -e GITHUB_OUTPUT=/repo/.gh-output \
+              -e SOURCE_DATE_EPOCH -w /work localhost/kestrel-builder:smoke "$@"
+          }
+          : > .gh-output
+          export SOURCE_DATE_EPOCH
+          SOURCE_DATE_EPOCH=$(jq -r '.kernel.pkgbuild_date' want/want.json | xargs -I{} date -d {} +%s)
+          run_in bash /repo/scripts/kernel-prepare.sh /repo/want/want.json /repo/want/config.cachyos /work/linux
+          set +e
+          run_in bash /repo/scripts/kernel-build.sh /work/linux "$BUDGET"
+          rc=$?
+          set -e
+          echo "kernel-build.sh exit $rc"
+          [ "$rc" -eq 75 ] || [ "$rc" -eq 0 ] || { tail -60 work/linux/kestrel-make.log; exit "$rc"; }
+          echo "objects compiled in ${BUDGET}s: $(find work/linux -name '*.o' | wc -l)"
+      - name: Spec files parse
+        run: |
+          podman run --rm --security-opt label=disable -v "$PWD:/repo" -w /repo localhost/kestrel-builder:smoke bash -c '
+            set -e
+            rpmspec -q --define "kestrel_stage /tmp" --define "kver 0.0.0-0-cachyos" --define "kversion 0.0.0" --define "krelease 0.kestrel.fc44" --define "channel stable" --define "filelist_core /dev/null" --define "filelist_devel /dev/null" --define "dist .fc44" rpm/kestrel-kernel.spec
+            rpmspec -q --define "kestrel_stage /tmp" --define "kver 0.0.0-0-cachyos" --define "nvver 0.0" --define "nvrelease 0.kestrel.fc44" --define "channel stable" --define "filelist /dev/null" --define "dist .fc44" rpm/kestrel-nvidia-kmod.spec
+          '
+      - name: Reference Containerfile syntax (no kestrel yet, dry parse only)
+        run: |
+          podman build --help >/dev/null
+          grep -c '^RUN' containers/Containerfile.reference
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: smoke-${{ inputs.channel }}-${{ github.run_id }}
+          path: |
+            want/want.json
+            work/linux/kestrel-prepare.json
+            work/linux/kestrel-final.config
+            work/linux/kestrel-make.log
+          if-no-files-found: ignore
+          retention-days: 3
