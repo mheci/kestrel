@@ -69,9 +69,10 @@ permissions:
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/kestrel
-  # 5h10m of compile per stage leaves room for prepare, cache save and the
-  # post-build steps inside the 6h job cap.
-  STAGE_BUDGET: "18600"
+  # 5h of compile per stage leaves room for the builder image, cache restore
+  # and save, and the post-build steps (NVIDIA, packaging, upload) inside
+  # the 355 minute job limit.
+  STAGE_BUDGET: "18000"
 
 jobs:
   resolve:

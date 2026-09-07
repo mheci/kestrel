@@ -53,9 +53,11 @@ runs:
       uses: actions/cache/restore@v6
       with:
         path: ccache
-        # Exact hit: same channel and same kernel major. A point release or
-        # tagrel bump restores the nearest previous cache for the major.
-        key: ccache-v1-${{ inputs.channel }}-${{ steps.want.outputs.srctag }}-${{ github.run_id }}-${{ github.run_attempt }}
+        # The key is unique per stage (run, attempt, job), so every stage
+        # saves its own progress; the prefixes restore the newest cache for
+        # the same tag, then for the channel (a point release starts from
+        # the previous tag's objects).
+        key: ccache-v1-${{ inputs.channel }}-${{ steps.want.outputs.srctag }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
         restore-keys: |
           ccache-v1-${{ inputs.channel }}-${{ steps.want.outputs.srctag }}-
           ccache-v1-${{ inputs.channel }}-
@@ -111,16 +113,21 @@ runs:
         run_in bash /repo/test/verify-static.sh /out
         cp want/want.json out/want.json
         sudo chown -R "$(id -u):$(id -g)" out ccache 2>/dev/null || true
-    - name: Wipe key
+    - name: Stop containers, wipe keys
+      # On cancel the runner kills the step's shell but the build container
+      # keeps running under conmon; stop it so the cache save reads a quiet
+      # tree (ccache writes are atomic, a stopped compile loses nothing).
       if: always()
       shell: bash
-      run: rm -rf secrets work/linux/certs/kestrel-signing-key.pem work/linux/certs/kestrel-keypair.pem 2>/dev/null || true
+      run: |
+        podman stop -a -t 20 >/dev/null 2>&1 || true
+        rm -rf secrets work/linux/certs/kestrel-signing-key.pem work/linux/certs/kestrel-keypair.pem 2>/dev/null || true
     - name: Save ccache
       if: always() && steps.build.outcome != 'skipped'
       uses: actions/cache/save@v6
       with:
         path: ccache
-        key: ccache-v1-${{ inputs.channel }}-${{ steps.want.outputs.srctag }}-${{ github.run_id }}-${{ github.run_attempt }}
+        key: ccache-v1-${{ inputs.channel }}-${{ steps.want.outputs.srctag }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}
     - name: Upload packaged output
       if: steps.build.outputs.kernel_done == 'true'
       uses: actions/upload-artifact@v7
