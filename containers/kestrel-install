@@ -6,14 +6,26 @@
 #   COPY --from=ghcr.io/mheci/kestrel:stable / /tmp/kestrel
 #   RUN /tmp/kestrel/usr/libexec/kestrel-install && rm -rf /tmp/kestrel
 #
+# With NVIDIA userspace from Terra or RPM Fusion, put the kestrel RPMs in the
+# same dnf transaction (kestrel-nvidia-kmod requires its kernel, and Terra's
+# nvidia-kmod-common requires nvidia-kmod, which kestrel-nvidia-kmod provides),
+# then run the installer; it skips packages that are already in place:
+#
+#   RUN rpm --import /tmp/kestrel/usr/share/kestrel/RPM-GPG-KEY-kestrel \
+#    && dnf5 -y install --enablerepo=terra-nvidia --exclude=akmod-nvidia,kmod-nvidia \
+#         nvidia-driver nvidia-driver-libs nvidia-kmod-common nvidia-modprobe nvidia-driver-selinux \
+#         /tmp/kestrel/rpms/kestrel-kernel-[0-9]*.rpm /tmp/kestrel/rpms/kestrel-nvidia-kmod-*.rpm \
+#    && /tmp/kestrel/usr/libexec/kestrel-install && rm -rf /tmp/kestrel
+#
 # What it does, in order:
 #   1. Reads /usr/share/kestrel/manifest.json next to itself.
 #   2. Refuses if NVIDIA userspace is installed at a different version than
 #      the modules (nothing half-matching ever reaches a boot).
 #   3. Removes the Fedora kernel packages (kernel, kernel-core, kernel-modules*)
 #      and any akmod-built nvidia kmod.
-#   4. Installs kestrel-kernel, kestrel-kernel-devel (unless --no-devel) and
-#      kestrel-nvidia-kmod with rpm, no scriptlets.
+#   4. Installs whichever of kestrel-kernel, kestrel-kernel-devel (unless
+#      --no-devel) and kestrel-nvidia-kmod are not installed yet, with rpm,
+#      no scriptlets.
 #   5. Runs depmod for the new kernel.
 #   6. Writes a dnf exclude so a later `dnf install foo` cannot pull the Fedora
 #      kernel back (--no-dnf-guard to skip).
@@ -43,7 +55,7 @@ while [[ $# -gt 0 ]]; do
     --no-devel) do_devel=0 ;;
     --keep-nvidia-userspace-mismatch) allow_mismatch=1 ;;
     --source) shift; src=$(readlink -f "${1:?--source needs a path}") ;;
-    -h|--help) sed -n '2,32p' "$self"; exit 0 ;;
+    -h|--help) sed -n '2,44p' "$self"; exit 0 ;;
     *) die "unknown option $1" ;;
   esac
   shift
@@ -127,11 +139,20 @@ if [[ $rpm_sig_kind == project ]]; then
 else
   say "note: RPMs are unsigned (local build); installing with --nosignature"
 fi
-say "installing: $(printf '%s ' "${pkgs[@]##*/}")"
-# --noscripts is belt and braces: the specs have none. --nodeps: the
-# kernel's provides are what other packages want, and rpm already sees them.
-rpm -Uvh --noscripts --nodeps "${verify[@]}" "${pkgs[@]}" >/dev/null
+# Skip what a previous dnf transaction already installed at this exact NEVRA.
+todo=()
+for r in "${pkgs[@]}"; do
+  nevra=$(rpm -qp --qf '%{NAME}-%{EVR}.%{ARCH}' "${verify[@]}" "$r" 2>/dev/null)
+  if rpm -q "$nevra" >/dev/null 2>&1; then say "already installed: $nevra"; else todo+=("$r"); fi
+done
+if [[ ${#todo[@]} -gt 0 ]]; then
+  say "installing: $(printf '%s ' "${todo[@]##*/}")"
+  # --noscripts is belt and braces: the specs have none. --nodeps: the
+  # kernel's provides are what other packages want, and rpm already sees them.
+  rpm -Uvh --noscripts --nodeps "${verify[@]}" "${todo[@]}" >/dev/null
+fi
 rpm -q kestrel-kernel kestrel-nvidia-kmod >/dev/null || die "rpm install failed"
+[[ $do_devel -eq 0 ]] || rpm -q kestrel-kernel-devel >/dev/null || die "kestrel-kernel-devel missing after install"
 
 # 5. depmod.
 [[ -f /usr/lib/modules/$kver/vmlinuz ]] || die "vmlinuz missing after install"

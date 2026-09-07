@@ -15,23 +15,29 @@ into your own image build.
 ```Dockerfile
 FROM ghcr.io/ublue-os/kinoite-main:latest
 
-# NVIDIA userspace from Terra (or RPM Fusion) at the version kestrel carries.
-# The version is in the kestrel manifest; the installer refuses a mismatch.
+# NVIDIA userspace from Terra (or RPM Fusion) at the version kestrel carries,
+# in one transaction with the kestrel kernel and kmod. The version is in the
+# kestrel manifest; the installer refuses a mismatch.
 COPY --from=ghcr.io/mheci/kestrel:stable / /tmp/kestrel
-RUN dnf5 -y install --enablerepo=terra-nvidia --exclude=akmod-nvidia,kmod-nvidia \
+RUN rpm --import /tmp/kestrel/usr/share/kestrel/RPM-GPG-KEY-kestrel \
+ && dnf5 -y install --enablerepo=terra-nvidia --exclude=akmod-nvidia,kmod-nvidia \
       nvidia-driver nvidia-driver-libs nvidia-kmod-common nvidia-modprobe nvidia-driver-selinux \
-      /tmp/kestrel/rpms/kestrel-nvidia-kmod-*.rpm \
+      /tmp/kestrel/rpms/kestrel-kernel-[0-9]*.rpm /tmp/kestrel/rpms/kestrel-nvidia-kmod-*.rpm \
  && /tmp/kestrel/usr/libexec/kestrel-install \
  && rm -rf /tmp/kestrel
 ```
 
-`kestrel-install` removes the Fedora kernel packages, installs
-`kestrel-kernel`, `kestrel-kernel-devel` and `kestrel-nvidia-kmod` with rpm,
-runs depmod, writes a dnf `excludepkgs` guard so a later `dnf install` cannot
-pull the Fedora kernel back, generates the initramfs with the image's own
-dracut configuration, and checks that exactly one kernel remains under
-`/usr/lib/modules` with nothing in `/boot`. `kestrel-install --help` lists the
-switches (`--no-initramfs`, `--no-dnf-guard`, `--no-devel`).
+Without NVIDIA userspace, `kestrel-install` alone is enough; it installs the
+RPMs itself.
+
+`kestrel-install` removes the Fedora kernel packages, installs whichever of
+`kestrel-kernel`, `kestrel-kernel-devel` and `kestrel-nvidia-kmod` are not in
+place yet (with rpm, no scriptlets), runs depmod, writes a dnf `excludepkgs`
+guard so a later `dnf install` cannot pull the Fedora kernel back, generates
+the initramfs with the image's own dracut configuration, and checks that
+exactly one kernel remains under `/usr/lib/modules` with nothing in `/boot`.
+`kestrel-install --help` lists the switches (`--no-initramfs`,
+`--no-dnf-guard`, `--no-devel`).
 
 If you would rather do it yourself, the RPMs are plain packages under
 `/rpms/` with no scriptlets. `kestrel-nvidia-kmod` provides

@@ -15,8 +15,10 @@ ARG NVIDIA_VERSION
 ARG FEDORA_RELEASE
 COPY --from=kestrel / /tmp/kestrel
 
-# Terra userspace at exactly the module version. The base ships
-# nvidia-gpu-firmware (linux-firmware split) which is unrelated to the driver.
+# Terra userspace at exactly the module version, in one transaction with the
+# kestrel kernel and kmod: nvidia-kmod-common needs nvidia-kmod, which
+# kestrel-nvidia-kmod provides, and that in turn needs its kernel. The Fedora
+# kernel is still installed at this point; kestrel-install removes it next.
 RUN set -euo pipefail; \
     dnf5 -y install --nogpgcheck \
       --repofrompath "terra,https://repos.fyralabs.com/terra${FEDORA_RELEASE}" \
@@ -30,8 +32,9 @@ RUN set -euo pipefail; \
       "nvidia-kmod-common-${NVIDIA_VERSION}" \
       "nvidia-driver-cuda-${NVIDIA_VERSION}" \
       nvidia-modprobe nvidia-driver-selinux \
+      /tmp/kestrel/rpms/kestrel-kernel-[0-9]*.rpm \
       /tmp/kestrel/rpms/kestrel-nvidia-kmod-*.rpm; \
-    rpm -q nvidia-driver nvidia-kmod-common kestrel-nvidia-kmod; \
+    rpm -q nvidia-driver nvidia-kmod-common kestrel-kernel kestrel-nvidia-kmod; \
     rpm -q akmod-nvidia kmod-nvidia >/dev/null 2>&1 && exit 1 || true
 
 RUN /tmp/kestrel/usr/libexec/kestrel-install && rm -rf /tmp/kestrel
