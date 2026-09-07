@@ -180,14 +180,21 @@ fi
 if [[ $do_initramfs -eq 1 ]]; then
   command -v dracut >/dev/null || die "dracut not found; rerun with --no-initramfs and build it yourself"
   say "dracut for $kver"
-  # The image's own dracut.conf.d decides the module set (bootc base images
-  # add ostree and bootc there). Nothing is forced in beyond what dracut
-  # would put in any generic initramfs for this image.
-  dracut --no-hostonly --kver "$kver" --reproducible --zstd \
+  # The image's dracut.conf.d decides most of the module set. The ostree and
+  # bootc modules are the exception: their check() only admits them when
+  # asked (Fedora's ostree package ships the module without the conf that
+  # asks), which is why rpm-ostree passes --add ostree itself. Do the same
+  # for whichever of the two the image has.
+  add=()
+  for m in ostree bootc; do
+    if compgen -G "/usr/lib/dracut/modules.d/[0-9][0-9]$m" >/dev/null; then add+=(--add "$m"); fi
+  done
+  dracut --no-hostonly --kver "$kver" --reproducible --zstd "${add[@]}" \
     -f "/usr/lib/modules/$kver/initramfs.img" >/tmp/kestrel-dracut.log 2>&1 \
     || { tail -30 /tmp/kestrel-dracut.log >&2; die "dracut failed"; }
-  if command -v lsinitrd >/dev/null && ! lsinitrd "/usr/lib/modules/$kver/initramfs.img" 2>/dev/null | grep -q 'ostree-prepare-root'; then
-    say "warning: initramfs has no ostree-prepare-root; if this is a bootc image, add_dracutmodules+=\" ostree \" is missing from dracut.conf.d"
+  if compgen -G "/usr/lib/dracut/modules.d/[0-9][0-9]ostree" >/dev/null && command -v lsinitrd >/dev/null \
+     && ! lsinitrd "/usr/lib/modules/$kver/initramfs.img" 2>/dev/null | grep -q 'ostree-prepare-root'; then
+    die "initramfs lacks ostree-prepare-root although the ostree dracut module is installed"
   fi
   chmod 0600 "/usr/lib/modules/$kver/initramfs.img"
   rm -f /tmp/kestrel-dracut.log

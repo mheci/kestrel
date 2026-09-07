@@ -34,7 +34,8 @@ RPMs itself.
 `kestrel-kernel`, `kestrel-kernel-devel` and `kestrel-nvidia-kmod` are not in
 place yet (with rpm, no scriptlets), runs depmod, writes a dnf `excludepkgs`
 guard so a later `dnf install` cannot pull the Fedora kernel back, generates
-the initramfs with the image's own dracut configuration, and checks that
+the initramfs with the image's own dracut configuration plus the ostree and
+bootc modules (which only enter when asked, as rpm-ostree does), and checks that
 exactly one kernel remains under `/usr/lib/modules` with nothing in `/boot`.
 `kestrel-install --help` lists the switches (`--no-initramfs`,
 `--no-dnf-guard`, `--no-devel`).
