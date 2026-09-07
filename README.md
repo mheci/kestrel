@@ -91,8 +91,11 @@ Every six hours the poll workflow reads three upstreams: the CachyOS PKGBUILD
 for the variant (pinned to the commit that last touched it), the Fedora
 release behind `ghcr.io/ublue-os/kinoite-main:latest`, and the `nvidia-driver`
 version in Terra's nvidia repository for that release. A hash over those
-inputs and the kestrel tree is the build id. When it differs from the label on
-the published image, a channel build starts.
+inputs and the recipe files in this repository (channels, specs, scripts,
+builder and artifact Containerfiles, installer) is the build id. When it
+differs from the label on the published image, a channel build starts. Test
+and workflow changes do not enter the hash, so tightening a check never
+costs a rebuild.
 
 The build runs on free GitHub runners inside a Fedora container with Fedora's
 own clang and lld, so modules a consumer compiles later against

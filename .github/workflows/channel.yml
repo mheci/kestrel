@@ -29,6 +29,11 @@ on:
         required: false
         default: ""
         type: string
+      force:
+        description: build even when this build_id is already published
+        required: false
+        default: false
+        type: boolean
   workflow_call:
     inputs:
       channel:
@@ -46,6 +51,10 @@ on:
         required: false
         default: ""
         type: string
+      force:
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: channel-${{ inputs.channel }}
@@ -87,7 +96,11 @@ jobs:
           # The published manifest for the channel says which build_id is live.
           live=$(skopeo inspect "docker://$IMAGE:${{ inputs.channel }}" 2>/dev/null | jq -r '.Labels["io.kestrel.build_id"] // empty' || true)
           echo "live build_id: ${live:-none}; wanted: ${{ steps.r.outputs.build_id }}"
-          if [ -n "$live" ] && [ "$live" = "${{ steps.r.outputs.build_id }}" ]; then echo "already_published=true" >>"$GITHUB_OUTPUT"; else echo "already_published=false" >>"$GITHUB_OUTPUT"; fi
+          if [ -n "$live" ] && [ "$live" = "${{ steps.r.outputs.build_id }}" ] && [ "${{ inputs.force }}" != true ]; then
+            echo "already_published=true" >>"$GITHUB_OUTPUT"; echo "::notice::build_id $live is already live as $IMAGE:${{ inputs.channel }}; nothing to do"
+          else
+            echo "already_published=false" >>"$GITHUB_OUTPUT"
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: want-${{ inputs.channel }}-${{ github.run_id }}

@@ -71,12 +71,17 @@ github_api() {
 }
 
 # Build tree hash: the parts of this repository that change the artifact.
+# Hash of the recipe: every file whose content can change the bytes of the
+# artifact. A change here changes build_id, so the next poll rebuilds and the
+# fix reaches consumers without anyone dispatching anything. Files that only
+# test or publish the artifact (test/, Containerfile.reference, workflows,
+# issue.sh, retention.sh) stay out: changing a check must not cost a rebuild.
 kestrel_tree_hash() {
   (
     cd "$KESTREL_ROOT"
-    # Sorted file list with content hashes, hashed again.
-    find channels containers keys rpm scripts test .github/workflows/channel.yml .github/actions \
-      -type f -print0 2>/dev/null | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
+    find channels keys rpm scripts containers/Containerfile.builder containers/Containerfile.artifact \
+      containers/kestrel-install -type f ! -name issue.sh ! -name retention.sh -print0 2>/dev/null \
+      | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
   )
 }
 
