@@ -45,8 +45,11 @@ fetch "$source_url.asc" "$tarball.asc"
 export GNUPGHOME
 GNUPGHOME=$(mktemp -d)
 gpg --batch --quiet --import "$KESTREL_ROOT"/keys/cachyos-*.asc
-gpg --batch --status-fd 1 --verify "$tarball.asc" "$tarball" | tee "$work/gpg-status.txt" | grep -q '^\[GNUPG:\] VALIDSIG' \
-  || die "GPG verification of $srctag failed"
+# gpg's own exit code plus an explicit VALIDSIG line: a good signature by a
+# key that is not in the imported set exits non-zero, a bad one too.
+gpg --batch --status-fd 1 --verify "$tarball.asc" "$tarball" >"$work/gpg-status.txt" 2>"$work/gpg-stderr.txt" \
+  || { cat "$work/gpg-stderr.txt" >&2; die "GPG verification of $srctag failed"; }
+grep -q '^\[GNUPG:\] VALIDSIG' "$work/gpg-status.txt" || { cat "$work/gpg-stderr.txt" >&2; die "no VALIDSIG for $srctag"; }
 signer=$(grep '^\[GNUPG:\] VALIDSIG' "$work/gpg-status.txt" | awk '{print $NF}')
 log "signed by $signer"
 rm -rf "$GNUPGHOME"; unset GNUPGHOME

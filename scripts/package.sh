@@ -124,8 +124,9 @@ python3 "$KESTREL_ROOT/scripts/modsig.py" --cert "$cert" "$modlib/extra/nvidia/n
 endgroup
 
 group "depmod sanity on the staged tree"
-depmod -b "$stage/usr" -e -F "$src/System.map" "$kver" 2>&1 | tee "$out/depmod.log" | head -20
-[[ ! -s $out/depmod.log ]] || { grep -q -i 'needs unknown symbol\|error' "$out/depmod.log" && die "depmod reported problems"; }
+depmod -b "$stage/usr" -e -F "$src/System.map" "$kver" >"$out/depmod.log" 2>&1 || { cat "$out/depmod.log" >&2; die "depmod failed"; }
+head -20 "$out/depmod.log"
+if grep -q -i -E 'needs unknown symbol|error' "$out/depmod.log"; then die "depmod reported problems"; fi
 # The depmod output ships with the RPM so a plain `rpm -U` gives a working
 # module tree; kestrel-install runs depmod again after everything is in place.
 endgroup

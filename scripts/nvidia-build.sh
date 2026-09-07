@@ -67,14 +67,18 @@ group "Build modules for $kver"
 # Same flags CachyOS uses, minus their makepkg environment. CC must be the
 # kernel's compiler; the kernel-open Makefile reads CONFIG_CC_VERSION_TEXT
 # and would pick "clang" on its own, but we pass it so nothing is inferred.
+set +e
 make -C "$nvdir" \
   CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 \
   SYSSRC="$src" SYSOUT="$src" KERNEL_UNAME="$kver" \
   IGNORE_PREEMPT_RT_PRESENCE=1 IGNORE_CC_MISMATCH=yes \
   NV_EXCLUDE_KERNEL_MODULES="nvidia-vgpu-vfio" \
   CFLAGS= CXXFLAGS= LDFLAGS= \
-  -j"$(nproc)" modules 2>&1 | tee "$nvdir/kestrel-nvidia-make.log" | grep -E 'error|warning: .*(defined but|implicit)|conftest|CONFTEST|^make' | head -100 || true
-test "${PIPESTATUS[0]}" -eq 0 || die "nvidia make failed"
+  -j"$(nproc)" modules >"$nvdir/kestrel-nvidia-make.log" 2>&1
+rc=$?
+set -e
+grep -E 'error|warning: .*(defined but|implicit)|conftest|CONFTEST|^make' "$nvdir/kestrel-nvidia-make.log" | head -100 || true
+[[ $rc -eq 0 ]] || { tail -40 "$nvdir/kestrel-nvidia-make.log" >&2; die "nvidia make failed ($rc)"; }
 endgroup
 
 group "Check"
