@@ -1,0 +1,145 @@
+name: kernel stage
+description: >
+  One time-boxed slice of a kestrel kernel build. Restores the ccache for the
+  channel, prepares the tree (fast, deterministic), compiles until the budget
+  runs out or the kernel is done, saves the ccache, and reports kernel_done.
+  When done it also builds the NVIDIA modules, packages, verifies statically,
+  and uploads the packaged output as an artifact.
+inputs:
+  channel:
+    required: true
+  want-artifact:
+    description: name of the artifact holding want.json and config.cachyos
+    required: true
+  budget-seconds:
+    description: seconds of compile time before this stage stops and saves
+    required: true
+  signing-key:
+    description: PEM private key (secret); empty means ephemeral key
+    required: false
+    default: ""
+  rpm-gpg-key:
+    description: armored OpenPGP secret key for signing the RPMs; empty means unsigned
+    required: false
+    default: ""
+outputs:
+  kernel_done:
+    value: ${{ steps.build.outputs.kernel_done }}
+runs:
+  using: composite
+  steps:
+    - name: Free disk space
+      shell: bash
+      run: |
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/lib/jvm /usr/share/swift 2>/dev/null &
+        df -h / | tail -1
+    - name: Download want
+      uses: actions/download-artifact@v8
+      with:
+        name: ${{ inputs.want-artifact }}
+        path: want
+    - name: Read want
+      id: want
+      shell: bash
+      run: |
+        jq -c . want/want.json | cut -c1-300
+        echo "build_id=$(jq -r .build_id want/want.json)" >>"$GITHUB_OUTPUT"
+        echo "kver=$(jq -r .kver want/want.json)" >>"$GITHUB_OUTPUT"
+        echo "srctag=$(jq -r .kernel.srctag want/want.json)" >>"$GITHUB_OUTPUT"
+        echo "fedora=$(jq -r .fedora.release want/want.json)" >>"$GITHUB_OUTPUT"
+        echo "nvidia=$(jq -r .nvidia.version want/want.json)" >>"$GITHUB_OUTPUT"
+    - name: Restore ccache
+      id: ccache
+      uses: actions/cache/restore@v6
+      with:
+        path: ccache
+        # Exact hit: same channel and same kernel major. A point release or
+        # tagrel bump restores the nearest previous cache for the major.
+        key: ccache-v1-${{ inputs.channel }}-${{ steps.want.outputs.srctag }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          ccache-v1-${{ inputs.channel }}-${{ steps.want.outputs.srctag }}-
+          ccache-v1-${{ inputs.channel }}-
+    - name: Builder image
+      shell: bash
+      run: |
+        podman build -q --build-arg FEDORA_RELEASE=${{ steps.want.outputs.fedora }} \
+          -t localhost/kestrel-builder:${{ steps.want.outputs.fedora }} -f containers/Containerfile.builder containers/
+    - name: Signing key
+      shell: bash
+      env:
+        KEY: ${{ inputs.signing-key }}
+        RPMKEY: ${{ inputs.rpm-gpg-key }}
+      run: |
+        mkdir -p secrets && chmod 700 secrets
+        if [ -n "$KEY" ]; then printf '%s\n' "$KEY" > secrets/signing-key.pem; chmod 600 secrets/signing-key.pem; echo "module signing key present"; else echo "no module key: ephemeral"; fi
+        if [ -n "$RPMKEY" ]; then printf '%s\n' "$RPMKEY" > secrets/rpm-gpg-key.asc; chmod 600 secrets/rpm-gpg-key.asc; echo "rpm signing key present"; else echo "no rpm key: unsigned RPMs"; fi
+    - name: Prepare and build
+      id: build
+      shell: bash
+      env:
+        BUDGET: ${{ inputs.budget-seconds }}
+      run: |
+        set -euo pipefail
+        mkdir -p work ccache out
+        # Everything runs inside the Fedora builder so the toolchain is the
+        # one consumers get from dnf. The repo, work dir and cache are bind
+        # mounted; the container runs as root inside a rootless podman, and
+        # files come back owned by the runner user.
+        run_in() {
+          podman run --rm --security-opt label=disable \
+            -v "$PWD:/repo" -v "$PWD/work:/work" -v "$PWD/ccache:/ccache" -v "$PWD/out:/out" \
+            -e KESTREL_ROOT=/repo -e CCACHE_DIR=/ccache -e GITHUB_ACTIONS=1 -e GITHUB_OUTPUT=/repo/.gh-output \
+            -e GITHUB_SHA -e GITHUB_REPOSITORY -e GITHUB_SERVER_URL -e GITHUB_RUN_ID -e SOURCE_DATE_EPOCH \
+            -e KESTREL_SIGNING_KEY_FILE=/repo/secrets/signing-key.pem \
+            -e KESTREL_RPM_GPG_KEY_FILE=/repo/secrets/rpm-gpg-key.asc \
+            -w /work localhost/kestrel-builder:${{ steps.want.outputs.fedora }} "$@"
+        }
+        : > .gh-output
+        export SOURCE_DATE_EPOCH
+        SOURCE_DATE_EPOCH=$(jq -r '.kernel.pkgbuild_date' want/want.json | xargs -I{} date -d {} +%s)
+        run_in bash /repo/scripts/kernel-prepare.sh /repo/want/want.json /repo/want/config.cachyos /work/linux
+        set +e
+        run_in bash /repo/scripts/kernel-build.sh /work/linux "$BUDGET"
+        rc=$?
+        set -e
+        cat .gh-output >>"$GITHUB_OUTPUT" || true
+        if [ "$rc" -eq 75 ]; then echo "kernel_done=false" >>"$GITHUB_OUTPUT"; echo "::notice::budget exhausted, next stage resumes from ccache"; exit 0; fi
+        if [ "$rc" -ne 0 ]; then echo "kernel_done=false" >>"$GITHUB_OUTPUT"; exit "$rc"; fi
+        echo "kernel_done=true" >>"$GITHUB_OUTPUT"
+        run_in bash /repo/scripts/nvidia-build.sh /repo/want/want.json /work/linux /work/nvidia
+        run_in bash /repo/scripts/package.sh /repo/want/want.json /work/linux /work/nvidia /out
+        run_in bash /repo/test/verify-static.sh /out
+        cp want/want.json out/want.json
+        sudo chown -R "$(id -u):$(id -g)" out ccache 2>/dev/null || true
+    - name: Wipe key
+      if: always()
+      shell: bash
+      run: rm -rf secrets work/linux/certs/kestrel-signing-key.pem work/linux/certs/kestrel-keypair.pem 2>/dev/null || true
+    - name: Save ccache
+      if: always() && steps.build.outcome != 'skipped'
+      uses: actions/cache/save@v6
+      with:
+        path: ccache
+        key: ccache-v1-${{ inputs.channel }}-${{ steps.want.outputs.srctag }}-${{ github.run_id }}-${{ github.run_attempt }}
+    - name: Upload packaged output
+      if: steps.build.outputs.kernel_done == 'true'
+      uses: actions/upload-artifact@v7
+      with:
+        name: kestrel-${{ inputs.channel }}-${{ steps.want.outputs.build_id }}
+        path: out
+        retention-days: 14
+        compression-level: 0
+        if-no-files-found: error
+    - name: Upload build log on failure
+      if: failure()
+      uses: actions/upload-artifact@v7
+      with:
+        name: kestrel-${{ inputs.channel }}-buildlog-${{ github.run_id }}-${{ github.job }}
+        path: |
+          work/linux/kestrel-make.log
+          work/linux/kestrel-prepare.json
+          work/linux/.config
+          work/nvidia/kestrel-nvidia-make.log
+          out/*.log
+        if-no-files-found: ignore
+        retention-days: 7

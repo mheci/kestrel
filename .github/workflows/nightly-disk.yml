@@ -1,0 +1,107 @@
+# Nightly: build a qcow2 from the reference image with bootc-image-builder
+# and boot it through the real bootloader path (UEFI, GRUB, ostree, initramfs,
+# kestrel kernel, SELinux enforcing). This is the end-to-end proof; the
+# per-build QEMU test boots the kernel directly.
+name: nightly disk boot
+on:
+  schedule:
+    - cron: "41 3 * * *"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: channel to test
+        required: false
+        default: stable
+        type: choice
+        options: [stable, lts]
+
+permissions:
+  contents: read
+  packages: read
+  issues: write
+
+jobs:
+  disk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: ${{ github.event_name == 'workflow_dispatch' && fromJSON(format('["{0}"]', inputs.channel)) || fromJSON('["stable","lts"]') }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/runner-prep
+      - name: Pull published kestrel and read manifest
+        id: k
+        run: |
+          image=ghcr.io/${{ github.repository_owner }}/kestrel:${{ matrix.channel }}
+          if ! sudo podman pull -q "$image"; then
+            echo "::warning::$image is not published yet; nothing to test"
+            echo "skip=true" >>"$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "skip=false" >>"$GITHUB_OUTPUT"
+          sudo podman create --name k "$image" true >/dev/null
+          mkdir -p out && sudo podman cp k:/usr/share/kestrel/manifest.json out/manifest.json && sudo podman rm k >/dev/null
+          sudo chown -R "$(id -u)" out
+          jq -c '{channel,kver,build_id,nvidia:.nvidia.version,fedora:.fedora.release}' out/manifest.json
+          echo "nvidia=$(jq -r .nvidia.version out/manifest.json)" >>"$GITHUB_OUTPUT"
+          echo "fedora=$(jq -r .fedora.release out/manifest.json)" >>"$GITHUB_OUTPUT"
+          echo "base=$(jq -r .fedora.base_ref out/manifest.json)" >>"$GITHUB_OUTPUT"
+          echo "kver=$(jq -r .kver out/manifest.json)" >>"$GITHUB_OUTPUT"
+      - name: Build reference image (root podman, bib reads the root store)
+        if: steps.k.outputs.skip != 'true'
+        run: |
+          sudo podman build -f containers/Containerfile.reference \
+            --build-arg BASE_IMAGE=${{ steps.k.outputs.base }} \
+            --build-arg KESTREL_IMAGE=ghcr.io/${{ github.repository_owner }}/kestrel:${{ matrix.channel }} \
+            --build-arg NVIDIA_VERSION=${{ steps.k.outputs.nvidia }} \
+            --build-arg FEDORA_RELEASE=${{ steps.k.outputs.fedora }} \
+            -t localhost/kestrel-reference:nightly .
+          sudo podman image inspect localhost/kestrel-reference:nightly --format 'reference image {{.Size}} bytes'
+      - name: bootc-image-builder qcow2
+        if: steps.k.outputs.skip != 'true'
+        run: |
+          mkdir -p disk/output
+          cat > disk/config.toml <<'EOF'
+          [[customizations.user]]
+          name = "kestrel"
+          password = "kestrel"
+          groups = ["wheel"]
+          [[customizations.filesystem]]
+          mountpoint = "/"
+          minsize = "20 GiB"
+          [customizations.kernel]
+          append = "console=ttyS0,115200n8 module.sig_enforce=1"
+          EOF
+          sudo podman pull -q quay.io/centos-bootc/bootc-image-builder:latest
+          sudo podman run --rm --privileged --pull=newer --net=host \
+            --security-opt label=type:unconfined_t \
+            --security-opt apparmor=unconfined \
+            --security-opt seccomp=unconfined \
+            -v "$PWD/disk/config.toml":/config.toml:ro \
+            -v "$PWD/disk/output":/output \
+            -v /var/lib/containers/storage:/var/lib/containers/storage \
+            quay.io/centos-bootc/bootc-image-builder:latest \
+            --type qcow2 --rootfs btrfs --use-librepo=True \
+            --chown "$(id -u):$(id -g)" \
+            localhost/kestrel-reference:nightly
+          ls -la disk/output/qcow2/
+      - name: Boot through the bootloader
+        if: steps.k.outputs.skip != 'true'
+        run: test/boot-disk.sh disk/output/qcow2/disk.qcow2 out
+      - uses: actions/upload-artifact@v7
+        if: always() && steps.k.outputs.skip != 'true'
+        with:
+          name: nightly-${{ matrix.channel }}-${{ github.run_id }}
+          path: |
+            out/disk-console.log
+            out/disk-result.txt
+            out/manifest.json
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Report
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          scripts/issue.sh open "${{ matrix.channel }}" "Nightly disk boot of ${{ steps.k.outputs.kver }} failed. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

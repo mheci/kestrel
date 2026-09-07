@@ -75,7 +75,7 @@ kestrel_tree_hash() {
   (
     cd "$KESTREL_ROOT"
     # Sorted file list with content hashes, hashed again.
-    find channels containers keys rpm scripts test .github/workflows/channel.yml \
+    find channels containers keys rpm scripts test .github/workflows/channel.yml .github/actions \
       -type f -print0 2>/dev/null | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
   )
 }

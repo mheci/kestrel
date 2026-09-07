@@ -17,7 +17,7 @@
 # then says signing.key = "ephemeral".
 
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-need curl gpg tar jq python3 make clang ld.lld llvm-ar openssl pahole
+need curl gpg tar jq python3 make clang ld.lld llvm-ar openssl pahole ccache
 
 want=${1:?}
 cfg=${2:?}
@@ -59,7 +59,7 @@ tar -xzf "$tarball" -C "$src" --strip-components=1
 [[ -f $src/Makefile && -d $src/kernel ]] || die "unexpected tarball layout"
 endgroup
 
-cd "$src"
+cd "$src" || die "cannot enter $src"
 
 group "Version files"
 # Same mechanism the PKGBUILD uses: localversion files give -<tagrel>-<suffix>.
@@ -183,9 +183,11 @@ diff <(openssl pkey -in certs/kestrel-signing-key.pem -pubout 2>/dev/null) <(ope
   || die "signing key does not match keys/kestrel.crt"
 cfgset --set-str MODULE_SIG_KEY "certs/kestrel-keypair.pem"
 cfgset -d MODULE_SIG_KEY_TYPE_ECDSA -e MODULE_SIG_KEY_TYPE_RSA
-cfgset --set-str SYSTEM_TRUSTED_KEYS "certs/kestrel.crt"
-note 'CONFIG_MODULE_SIG_KEY=certs/kestrel-keypair.pem, RSA-4096 project key (CachyOS: per-build ECDSA P-384)'
-note 'CONFIG_SYSTEM_TRUSTED_KEYS=certs/kestrel.crt (CachyOS: empty)'
+# The MODULE_SIG_KEY certificate is compiled into the builtin trusted keyring
+# by Kbuild itself, so SYSTEM_TRUSTED_KEYS stays empty (adding the same cert
+# there would only load it twice).
+cfgset --set-str SYSTEM_TRUSTED_KEYS ""
+note 'CONFIG_MODULE_SIG_KEY=certs/kestrel-keypair.pem, RSA-4096 persistent project key (CachyOS: per-build ECDSA P-384)'
 
 # Build-time only: compressed DWARF halves the tree size on a 4 vCPU runner.
 # Debug info is stripped from everything shipped; BTF and ORC are unaffected.
@@ -207,11 +209,14 @@ endgroup
 
 group "olddefconfig with the kestrel toolchain"
 export KBUILD_BUILD_HOST=kestrel
-export KBUILD_BUILD_USER="kestrel-$(jget "$want" .channel)"
+KBUILD_BUILD_USER="kestrel-$(jget "$want" .channel)"; export KBUILD_BUILD_USER
 export KBUILD_BUILD_TIMESTAMP
 KBUILD_BUILD_TIMESTAMP=$(date -Ru -d "@${SOURCE_DATE_EPOCH:-$(date +%s)}")
-make LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld olddefconfig
-got_kver=$(make -s LLVM=1 kernelrelease)
+# Same CC string as kernel-build.sh so Kbuild never sees a compiler change.
+export CCACHE_DIR=${CCACHE_DIR:-$HOME/.cache/kestrel-ccache}
+mkdir -p "$CCACHE_DIR"
+make LLVM=1 LLVM_IAS=1 CC="ccache clang" HOSTCC="ccache clang" LD=ld.lld olddefconfig
+got_kver=$(make -s LLVM=1 CC="ccache clang" HOSTCC="ccache clang" kernelrelease)
 [[ $got_kver == "$want_kver" ]] || die "kernelrelease $got_kver != wanted $want_kver"
 log "kernelrelease $got_kver"
 
@@ -223,12 +228,13 @@ assert_cfg 'CONFIG_LTO_CLANG_THIN=y'
 assert_cfg 'CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=y'
 assert_cfg 'CONFIG_X86_64_VERSION=3'
 assert_cfg 'CONFIG_DEBUG_INFO_BTF=y'
-assert_cfg 'CONFIG_DEBUG_INFO_DWARF5=y'
+grep -qx 'CONFIG_DEBUG_INFO_DWARF5=y' .config || grep -qx 'CONFIG_DEBUG_INFO_DWARF4=y' .config || die "config assertion failed: full DWARF debug info"
+log "debug info: $(grep -oE '^CONFIG_DEBUG_INFO_DWARF[45]=y' .config)"
 assert_cfg 'CONFIG_DEFAULT_SECURITY_SELINUX=y'
 assert_cfg 'CONFIG_MODULE_SIG_ALL=y'
 assert_cfg 'CONFIG_MODULE_SIG_KEY_TYPE_RSA=y'
-assert_cfg 'CONFIG_HZ_1000=y'
-assert_cfg 'CONFIG_CACHY=y'
+assert_cfg "CONFIG_HZ_$(knob _HZ_ticks)=y"
+[[ $(knob _cachy_config) != yes ]] || assert_cfg 'CONFIG_CACHY=y'
 grep -q '^CONFIG_DEBUG_INFO_REDUCED=y' .config && die "DEBUG_INFO_REDUCED must stay off"
 grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y' .config && die "-Os must stay off"
 endgroup

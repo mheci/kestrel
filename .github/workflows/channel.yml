@@ -1,0 +1,335 @@
+# Build, prove and publish one kestrel channel.
+#
+# Dispatched by poll.yml when upstream inputs change, or by hand. The kernel
+# compile is split into up to four time-boxed stages that share a ccache;
+# stage N+1 only runs when stage N stopped for time. A point release usually
+# finishes in stage 1 because most objects are already cached.
+name: channel
+run-name: ${{ inputs.channel }} ${{ inputs.reason }}
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: stable or lts
+        required: true
+        type: choice
+        options: [stable, lts]
+      reason:
+        description: why (free text, shown in the run name)
+        required: false
+        default: manual
+        type: string
+      publish:
+        description: push to ghcr.io when green
+        required: false
+        default: true
+        type: boolean
+  workflow_call:
+    inputs:
+      channel:
+        required: true
+        type: string
+      reason:
+        required: false
+        default: poll
+        type: string
+      publish:
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: channel-${{ inputs.channel }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  issues: write
+  actions: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/kestrel
+  # 5h10m of compile per stage leaves room for prepare, cache save and the
+  # post-build steps inside the 6h job cap.
+  STAGE_BUDGET: "18600"
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      build_id: ${{ steps.r.outputs.build_id }}
+      kver: ${{ steps.r.outputs.kver }}
+      nvidia_version: ${{ steps.r.outputs.nvidia_version }}
+      fedora_release: ${{ steps.r.outputs.fedora_release }}
+      srctag: ${{ steps.r.outputs.srctag }}
+      already_published: ${{ steps.pub.outputs.already_published }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve inputs
+        id: r
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/resolve.sh "${{ inputs.channel }}" want
+      - name: Already published?
+        id: pub
+        run: |
+          # The published manifest for the channel says which build_id is live.
+          live=$(skopeo inspect "docker://$IMAGE:${{ inputs.channel }}" 2>/dev/null | jq -r '.Labels["io.kestrel.build_id"] // empty' || true)
+          echo "live build_id: ${live:-none}; wanted: ${{ steps.r.outputs.build_id }}"
+          if [ -n "$live" ] && [ "$live" = "${{ steps.r.outputs.build_id }}" ]; then echo "already_published=true" >>"$GITHUB_OUTPUT"; else echo "already_published=false" >>"$GITHUB_OUTPUT"; fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: want-${{ inputs.channel }}-${{ github.run_id }}
+          path: want/
+          retention-days: 7
+
+  stage1:
+    needs: resolve
+    if: needs.resolve.outputs.already_published != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    outputs:
+      kernel_done: ${{ steps.s.outputs.kernel_done }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: s
+        uses: ./.github/actions/kernel-stage
+        with:
+          channel: ${{ inputs.channel }}
+          want-artifact: want-${{ inputs.channel }}-${{ github.run_id }}
+          budget-seconds: ${{ env.STAGE_BUDGET }}
+          signing-key: ${{ secrets.KESTREL_SIGNING_KEY }}
+          rpm-gpg-key: ${{ secrets.KESTREL_RPM_GPG_KEY }}
+
+  stage2:
+    needs: [resolve, stage1]
+    if: needs.stage1.outputs.kernel_done != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    outputs:
+      kernel_done: ${{ steps.s.outputs.kernel_done }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: s
+        uses: ./.github/actions/kernel-stage
+        with:
+          channel: ${{ inputs.channel }}
+          want-artifact: want-${{ inputs.channel }}-${{ github.run_id }}
+          budget-seconds: ${{ env.STAGE_BUDGET }}
+          signing-key: ${{ secrets.KESTREL_SIGNING_KEY }}
+          rpm-gpg-key: ${{ secrets.KESTREL_RPM_GPG_KEY }}
+
+  stage3:
+    needs: [resolve, stage2]
+    if: needs.stage2.outputs.kernel_done != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    outputs:
+      kernel_done: ${{ steps.s.outputs.kernel_done }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: s
+        uses: ./.github/actions/kernel-stage
+        with:
+          channel: ${{ inputs.channel }}
+          want-artifact: want-${{ inputs.channel }}-${{ github.run_id }}
+          budget-seconds: ${{ env.STAGE_BUDGET }}
+          signing-key: ${{ secrets.KESTREL_SIGNING_KEY }}
+          rpm-gpg-key: ${{ secrets.KESTREL_RPM_GPG_KEY }}
+
+  stage4:
+    needs: [resolve, stage3]
+    if: needs.stage3.outputs.kernel_done != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    outputs:
+      kernel_done: ${{ steps.s.outputs.kernel_done }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: s
+        uses: ./.github/actions/kernel-stage
+        with:
+          channel: ${{ inputs.channel }}
+          want-artifact: want-${{ inputs.channel }}-${{ github.run_id }}
+          budget-seconds: ${{ env.STAGE_BUDGET }}
+          signing-key: ${{ secrets.KESTREL_SIGNING_KEY }}
+          rpm-gpg-key: ${{ secrets.KESTREL_RPM_GPG_KEY }}
+      - name: Still not done
+        if: steps.s.outputs.kernel_done != 'true'
+        run: |
+          echo "::error::kernel did not finish within four stages"
+          exit 1
+
+  prove:
+    # Runs when any stage reports done. `always()` keeps it alive past the
+    # skipped later stages; the condition then asks for a real success.
+    needs: [resolve, stage1, stage2, stage3, stage4]
+    if: >-
+      always() && needs.resolve.result == 'success' &&
+      (needs.stage1.outputs.kernel_done == 'true' || needs.stage2.outputs.kernel_done == 'true' ||
+       needs.stage3.outputs.kernel_done == 'true' || needs.stage4.outputs.kernel_done == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    outputs:
+      proven: ${{ steps.done.outputs.proven }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Reclaim disk (base image, its export and the ext4 disk all live on /)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /usr/lib/jvm /usr/share/swift /opt/hostedtoolcache/CodeQL 2>/dev/null &
+          df -h / | tail -1
+      - uses: actions/download-artifact@v8
+        with:
+          name: kestrel-${{ inputs.channel }}-${{ needs.resolve.outputs.build_id }}
+          path: out
+      - name: Static verification (again, on the artifact as uploaded)
+        # Same Fedora builder image as the build, so rpm, depmod and sbverify
+        # are the versions consumers get and rpm 6 reads the v4 packages.
+        run: |
+          podman build -q --build-arg FEDORA_RELEASE=${{ needs.resolve.outputs.fedora_release }} \
+            -t localhost/kestrel-builder:prove -f containers/Containerfile.builder containers/
+          podman run --rm --security-opt label=disable -v "$PWD:/repo" -e KESTREL_ROOT=/repo -w /repo \
+            localhost/kestrel-builder:prove bash test/verify-static.sh /repo/out
+      - name: Build artifact image
+        run: |
+          sudo podman build -f containers/Containerfile.artifact \
+            --build-arg KESTREL_CHANNEL=${{ inputs.channel }} \
+            --build-arg KESTREL_KVER=${{ needs.resolve.outputs.kver }} \
+            --build-arg KESTREL_NVIDIA=${{ needs.resolve.outputs.nvidia_version }} \
+            --build-arg KESTREL_BUILD_ID=${{ needs.resolve.outputs.build_id }} \
+            -t localhost/kestrel:build .
+          sudo podman image inspect localhost/kestrel:build --format 'artifact size {{.Size}} bytes, {{len .RootFS.Layers}} layers'
+      - name: Build reference image (kinoite-main + Terra nvidia + kestrel-install)
+        run: |
+          base=$(jq -r .fedora.base_ref out/want.json)
+          digest=$(jq -r .fedora.base_digest out/want.json)
+          sudo podman build -f containers/Containerfile.reference \
+            --build-arg BASE_IMAGE="${base%%:*}@${digest}" \
+            --build-arg KESTREL_IMAGE=localhost/kestrel:build \
+            --build-arg NVIDIA_VERSION=${{ needs.resolve.outputs.nvidia_version }} \
+            --build-arg FEDORA_RELEASE=${{ needs.resolve.outputs.fedora_release }} \
+            -t localhost/kestrel-reference:build .
+      - name: Reference image facts
+        run: |
+          sudo podman run --rm localhost/kestrel-reference:build bash -c '
+            set -e
+            echo "kernel dirs:"; ls /usr/lib/modules
+            ls -la /usr/lib/modules/*/vmlinuz /usr/lib/modules/*/initramfs.img
+            echo "boot:"; ls -A /boot || true
+            rpm -q kestrel-kernel kestrel-kernel-devel kestrel-nvidia-kmod nvidia-driver nvidia-kmod-common
+            rpm -q kernel-core && exit 1 || echo "fedora kernel gone"
+            echo "dnf guard:"; cat /etc/dnf/libdnf5.conf.d/90-kestrel.conf
+            echo "dnf sees kernel-core as excluded:"; dnf5 -q repoquery kernel-core 2>&1 | head -2 || true
+            echo "initramfs (ostree in, nvidia out per Terra 99-nvidia.conf):"; lsinitrd /usr/lib/modules/*/initramfs.img 2>/dev/null | grep -E "nvidia.*\.ko|ostree-prepare-root|bootc-root-setup" | head -8; lsinitrd /usr/lib/modules/*/initramfs.img 2>/dev/null | grep -q ostree-prepare-root
+            echo "kargs:"; cat /usr/lib/bootc/kargs.d/*.toml
+            bootc container lint
+          '
+      - name: QEMU boot
+        env:
+          KESTREL_BOOT_TIMEOUT: "900"
+        run: |
+          sudo apt-get install -y -qq qemu-system-x86 ovmf e2fsprogs >/dev/null
+          chmod +x test/*.sh scripts/*.sh
+          sudo -E test/boot-qemu.sh localhost/kestrel-reference:build out
+          sudo chown -R "$(id -u)" out
+      - name: Save proof
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: proof-${{ inputs.channel }}-${{ needs.resolve.outputs.build_id }}
+          path: |
+            out/boot-console.log
+            out/boot-result.json
+            out/manifest.json
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Save artifact image for publish
+        run: sudo podman save --format oci-archive -o kestrel-image.tar localhost/kestrel:build && sudo chown "$(id -u)" kestrel-image.tar
+      - uses: actions/upload-artifact@v7
+        with:
+          name: image-${{ inputs.channel }}-${{ needs.resolve.outputs.build_id }}
+          path: kestrel-image.tar
+          retention-days: 3
+          compression-level: 0
+      - id: done
+        run: echo "proven=true" >>"$GITHUB_OUTPUT"
+
+  publish:
+    needs: [resolve, prove]
+    if: always() && needs.prove.outputs.proven == 'true' && inputs.publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: image-${{ inputs.channel }}-${{ needs.resolve.outputs.build_id }}
+      - uses: sigstore/cosign-installer@v4
+      - name: Login
+        run: podman login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+      - name: Tags
+        id: tags
+        run: |
+          ch=${{ inputs.channel }}
+          kver=${{ needs.resolve.outputs.kver }}
+          nv=${{ needs.resolve.outputs.nvidia_version }}
+          kv=${kver%-cachyos*}   # 7.2.3-2
+          tags="$ch $ch-$kv-$nv $ch-$kver $ch-$kv $ch-fc${{ needs.resolve.outputs.fedora_release }}"
+          echo "tags=$tags" >>"$GITHUB_OUTPUT"; echo "$tags"
+      - name: Push
+        id: push
+        run: |
+          podman load -i kestrel-image.tar
+          for t in ${{ steps.tags.outputs.tags }}; do
+            podman tag localhost/kestrel:build "$IMAGE:$t"
+            podman push --digestfile "digest-$t" "$IMAGE:$t"
+          done
+          digest=$(cat "digest-${{ inputs.channel }}")
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+          echo "pushed $IMAGE@$digest"
+      - name: Sign (cosign keyless)
+        # Legacy referrers mode keeps the signature reachable as the tag
+        # sha256-<digest>.sig, which retention.sh deletes together with the
+        # image, and which older cosign clients still understand.
+        run: cosign sign -y --registry-referrers-mode legacy "$IMAGE@${{ steps.push.outputs.digest }}"
+      - name: Verify signature
+        run: |
+          cosign verify "$IMAGE@${{ steps.push.outputs.digest }}" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            | jq -c '.[0].optional | {Issuer, Subject, workflow: .githubWorkflowName}' 
+      - name: Package visibility
+        # A package created by GITHUB_TOKEN starts private. Consumers COPY
+        # --from it anonymously, so make it public on first publish.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          vis=$(gh api "users/${{ github.repository_owner }}/packages/container/kestrel" --jq .visibility 2>/dev/null || echo unknown)
+          echo "package visibility: $vis"
+          if [ "$vis" != public ]; then
+            echo "::warning::ghcr.io/${{ github.repository_owner }}/kestrel is $vis; set it to public under package settings (GITHUB_TOKEN cannot change visibility)"
+          fi
+      - name: Retention (keep current + 2 previous per channel)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: scripts/retention.sh "${{ inputs.channel }}" 2 || echo "::warning::retention did not complete (see log)"
+      - name: Close failure issue if open
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          scripts/issue.sh close "${{ inputs.channel }}" "Published ${{ needs.resolve.outputs.kver }} with NVIDIA ${{ needs.resolve.outputs.nvidia_version }} as $IMAGE@${{ steps.push.outputs.digest }} in run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}."
+
+  report-failure:
+    needs: [resolve, stage1, stage2, stage3, stage4, prove, publish]
+    if: always() && needs.resolve.outputs.already_published != 'true' && contains(needs.*.result, 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Open or update the channel issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          scripts/issue.sh open "${{ inputs.channel }}" \
+            "Build of ${{ needs.resolve.outputs.kver || 'unresolved' }} with NVIDIA ${{ needs.resolve.outputs.nvidia_version || '?' }} failed. Stage results: resolve=${{ needs.resolve.result }} stage1=${{ needs.stage1.result }} stage2=${{ needs.stage2.result }} stage3=${{ needs.stage3.result }} stage4=${{ needs.stage4.result }} prove=${{ needs.prove.result }} publish=${{ needs.publish.result }}. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. The \`${{ inputs.channel }}\` tag stays at the last green build."

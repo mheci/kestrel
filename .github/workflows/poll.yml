@@ -1,0 +1,64 @@
+# Every six hours: resolve each channel's inputs and start a build when the
+# published image does not match. Nothing is built here; the channel
+# workflow does the work under its own concurrency group.
+name: poll
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: dispatch builds even when nothing changed
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: write
+  packages: read
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [stable, lts]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Resolve
+        id: r
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/resolve.sh "${{ matrix.channel }}" want
+      - name: Compare with published
+        id: cmp
+        run: |
+          image=ghcr.io/${{ github.repository_owner }}/kestrel
+          live=$(skopeo inspect "docker://$image:${{ matrix.channel }}" 2>/dev/null | jq -r '.Labels["io.kestrel.build_id"] // empty' || true)
+          want=${{ steps.r.outputs.build_id }}
+          echo "live=${live:-none} want=$want"
+          if [ "${{ inputs.force }}" = "true" ] || [ -z "$live" ] || [ "$live" != "$want" ]; then
+            echo "dispatch=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "dispatch=false" >>"$GITHUB_OUTPUT"
+          fi
+      - name: Skip if a build for this channel is already running
+        id: running
+        if: steps.cmp.outputs.dispatch == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh run list --repo "${{ github.repository }}" --workflow channel.yml --status in_progress --json displayTitle --jq '[.[] | select(.displayTitle | startswith("${{ matrix.channel }} "))] | length')
+          q=$(gh run list --repo "${{ github.repository }}" --workflow channel.yml --status queued --json displayTitle --jq '[.[] | select(.displayTitle | startswith("${{ matrix.channel }} "))] | length')
+          echo "in progress: $n, queued: $q"
+          if [ "$n" != "0" ] || [ "$q" != "0" ]; then echo "busy=true" >>"$GITHUB_OUTPUT"; else echo "busy=false" >>"$GITHUB_OUTPUT"; fi
+      - name: Dispatch channel build
+        if: steps.cmp.outputs.dispatch == 'true' && steps.running.outputs.busy != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          reason="poll: ${{ steps.r.outputs.srctag }} nvidia ${{ steps.r.outputs.nvidia_version }} fc${{ steps.r.outputs.fedora_release }}"
+          gh workflow run channel.yml --repo "${{ github.repository }}" -f channel=${{ matrix.channel }} -f reason="$reason" -f publish=true
+          echo "dispatched: $reason"

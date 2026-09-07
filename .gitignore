@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+work/
+out/
+ccache/
+secrets/
+want/

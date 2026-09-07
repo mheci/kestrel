@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# kestrel-install: put the kestrel kernel and NVIDIA modules into a bootc image.
+#
+# Run inside a Containerfile after COPY --from=ghcr.io/mheci/kestrel:<channel>:
+#
+#   COPY --from=ghcr.io/mheci/kestrel:stable / /tmp/kestrel
+#   RUN /tmp/kestrel/usr/libexec/kestrel-install && rm -rf /tmp/kestrel
+#
+# What it does, in order:
+#   1. Reads /usr/share/kestrel/manifest.json next to itself.
+#   2. Refuses if NVIDIA userspace is installed at a different version than
+#      the modules (nothing half-matching ever reaches a boot).
+#   3. Removes the Fedora kernel packages (kernel, kernel-core, kernel-modules*)
+#      and any akmod-built nvidia kmod.
+#   4. Installs kestrel-kernel, kestrel-kernel-devel (unless --no-devel) and
+#      kestrel-nvidia-kmod with rpm, no scriptlets.
+#   5. Runs depmod for the new kernel.
+#   6. Writes a dnf exclude so a later `dnf install foo` cannot pull the Fedora
+#      kernel back (--no-dnf-guard to skip).
+#   7. Generates the initramfs with the image's own dracut config
+#      (--no-initramfs to skip; bootc requires one to exist before lint).
+#   8. Leaves exactly one directory under /usr/lib/modules and nothing in /boot.
+#
+# Options:
+#   --no-initramfs   skip dracut (you run it later, e.g. after more drivers)
+#   --no-dnf-guard   do not write /etc/dnf/libdnf5.conf.d/90-kestrel.conf
+#   --no-devel       do not install kestrel-kernel-devel
+#   --keep-nvidia-userspace-mismatch  proceed even if nvidia-driver differs (not recommended)
+#   --source DIR     where the kestrel tree was copied (default: the tree this script lives in)
+
+set -o errexit -o nounset -o pipefail
+
+say() { printf 'kestrel-install: %s\n' "$*" >&2; }
+die() { printf 'kestrel-install: error: %s\n' "$*" >&2; exit 1; }
+
+do_initramfs=1 do_guard=1 do_devel=1 allow_mismatch=0
+self=$(readlink -f "${BASH_SOURCE[0]}")
+src=$(cd "$(dirname "$self")/../.." && pwd)
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-initramfs) do_initramfs=0 ;;
+    --no-dnf-guard) do_guard=0 ;;
+    --no-devel) do_devel=0 ;;
+    --keep-nvidia-userspace-mismatch) allow_mismatch=1 ;;
+    --source) shift; src=$(readlink -f "${1:?--source needs a path}") ;;
+    -h|--help) sed -n '2,32p' "$self"; exit 0 ;;
+    *) die "unknown option $1" ;;
+  esac
+  shift
+done
+
+[[ $(id -u) -eq 0 ]] || die "must run as root inside the image build"
+manifest="$src/usr/share/kestrel/manifest.json"
+[[ -f $manifest ]] || die "manifest not found at $manifest (is --source right?)"
+command -v jq >/dev/null || die "jq is required"
+command -v rpm >/dev/null || die "rpm is required"
+command -v depmod >/dev/null || die "kmod (depmod) is required"
+
+kver=$(jq -r .kver "$manifest")
+nvver=$(jq -r .nvidia.version "$manifest")
+channel=$(jq -r .channel "$manifest")
+[[ -n $kver && $kver != null ]] || die "manifest has no kver"
+say "channel=$channel kver=$kver nvidia=$nvver"
+
+rpmdir="$src/rpms"
+kernel_rpm=$(ls "$rpmdir"/kestrel-kernel-[0-9]*.rpm 2>/dev/null | head -1)
+devel_rpm=$(ls "$rpmdir"/kestrel-kernel-devel-*.rpm 2>/dev/null | head -1)
+nvidia_rpm=$(ls "$rpmdir"/kestrel-nvidia-kmod-*.rpm 2>/dev/null | head -1)
+[[ -f $kernel_rpm && -f $nvidia_rpm ]] || die "RPMs missing under $rpmdir"
+[[ $do_devel -eq 0 || -f $devel_rpm ]] || die "devel RPM missing"
+
+# 2. NVIDIA userspace must match the modules exactly.
+if rpm -q nvidia-driver >/dev/null 2>&1; then
+  have=$(rpm -q --qf '%{VERSION}\n' nvidia-driver | head -1)
+  if [[ $have != "$nvver" ]]; then
+    if [[ $allow_mismatch -eq 1 ]]; then
+      say "warning: nvidia-driver $have != modules $nvver, continuing because you asked"
+    else
+      die "nvidia-driver $have is installed but kestrel carries modules for $nvver. Install nvidia-driver-$nvver (Terra/RPM Fusion) or pin the kestrel tag that matches."
+    fi
+  else
+    say "nvidia-driver $have matches"
+  fi
+else
+  say "note: nvidia-driver userspace not installed; modules are usable once nvidia-driver $nvver is added"
+fi
+
+# 3. Remove the Fedora kernel and any akmod leftovers.
+mapfile -t old < <(rpm -qa --qf '%{NAME}\n' 'kernel' 'kernel-core' 'kernel-modules' 'kernel-modules-core' 'kernel-modules-extra' 'kernel-devel' 'kernel-devel-matched' 'kernel-uki-virt' 'kernel-modules-internal' 'kmod-nvidia*' 'akmod-nvidia*' 'kernel-cachyos*' 2>/dev/null | sort -u)
+if [[ ${#old[@]} -gt 0 ]]; then
+  say "removing: ${old[*]}"
+  # --noscripts: the kernel %preun calls kernel-install remove, which is
+  # meaningless in a container and can fail. --nodeps: things like
+  # virtualbox-guest-additions depend on kernel-uname-r; we provide it again
+  # in the same breath, so a hard failure here would be wrong.
+  rpm -e --noscripts --nodeps "${old[@]}"
+fi
+# Directories left behind by the old kernel (rpm keeps non-owned files).
+for d in /usr/lib/modules/*/; do
+  d=${d%/}
+  [[ $(basename "$d") == "$kver" ]] && continue
+  say "removing stale $d"
+  rm -rf "$d"
+done
+
+# 4. Install kestrel RPMs. Verify the OpenPGP signature first when the
+# packages carry one (every published build does; the key travels with
+# the artifact and is also in the repo as keys/RPM-GPG-KEY-kestrel).
+pkgs=("$kernel_rpm" "$nvidia_rpm")
+[[ $do_devel -eq 1 ]] && pkgs+=("$devel_rpm")
+rpm_key="$src/usr/share/kestrel/RPM-GPG-KEY-kestrel"
+rpm_sig_kind=$(jq -r '.signing.rpm.key // "none"' "$manifest")
+verify=(--nosignature)
+if [[ $rpm_sig_kind == project ]]; then
+  [[ -f $rpm_key ]] || die "manifest says RPMs are signed but $rpm_key is missing"
+  rpm --import "$rpm_key" || die "rpm --import of the kestrel key failed"
+  for r in "${pkgs[@]}"; do
+    rpmkeys --define '_pkgverify_level all' --checksig "$r" >/dev/null || die "signature check failed for ${r##*/}"
+  done
+  say "RPM signatures verified against $(jq -r .signing.rpm.openpgp_fingerprint "$manifest")"
+  verify=()
+else
+  say "note: RPMs are unsigned (local build); installing with --nosignature"
+fi
+say "installing: $(printf '%s ' "${pkgs[@]##*/}")"
+# --noscripts is belt and braces: the specs have none. --nodeps: the
+# kernel's provides are what other packages want, and rpm already sees them.
+rpm -Uvh --noscripts --nodeps "${verify[@]}" "${pkgs[@]}" >/dev/null
+rpm -q kestrel-kernel kestrel-nvidia-kmod >/dev/null || die "rpm install failed"
+
+# 5. depmod.
+[[ -f /usr/lib/modules/$kver/vmlinuz ]] || die "vmlinuz missing after install"
+depmod -a -e -F "/usr/lib/modules/$kver/System.map" "$kver" || die "depmod failed"
+modinfo -k "$kver" nvidia >/dev/null 2>&1 || die "nvidia module not visible to modinfo"
+
+# 6. dnf guard.
+if [[ $do_guard -eq 1 ]]; then
+  mkdir -p /etc/dnf/libdnf5.conf.d
+  cat >/etc/dnf/libdnf5.conf.d/90-kestrel.conf <<'EOF'
+# Written by kestrel-install. The kernel in this image comes from
+# ghcr.io/mheci/kestrel; keep dnf from pulling the Fedora kernel back in.
+[main]
+excludepkgs=kernel,kernel-core,kernel-modules,kernel-modules-core,kernel-modules-extra,kernel-devel,kernel-devel-matched,kernel-uki-virt,akmod-nvidia,kmod-nvidia
+EOF
+  # dnf4 style for images that still carry it.
+  if [[ -f /etc/dnf/dnf.conf ]] && ! grep -q '^excludepkgs=.*kernel-core' /etc/dnf/dnf.conf; then
+    printf 'excludepkgs=kernel,kernel-core,kernel-modules,kernel-modules-core,kernel-modules-extra,kernel-devel,akmod-nvidia,kmod-nvidia\n' >>/etc/dnf/dnf.conf
+  fi
+fi
+
+# 7. initramfs.
+if [[ $do_initramfs -eq 1 ]]; then
+  command -v dracut >/dev/null || die "dracut not found; rerun with --no-initramfs and build it yourself"
+  say "dracut for $kver"
+  # The image's own dracut.conf.d decides the module set (bootc base images
+  # add ostree and bootc there). Nothing is forced in beyond what dracut
+  # would put in any generic initramfs for this image.
+  dracut --no-hostonly --kver "$kver" --reproducible --zstd \
+    -f "/usr/lib/modules/$kver/initramfs.img" >/tmp/kestrel-dracut.log 2>&1 \
+    || { tail -30 /tmp/kestrel-dracut.log >&2; die "dracut failed"; }
+  if command -v lsinitrd >/dev/null && ! lsinitrd "/usr/lib/modules/$kver/initramfs.img" 2>/dev/null | grep -q 'ostree-prepare-root'; then
+    say "warning: initramfs has no ostree-prepare-root; if this is a bootc image, add_dracutmodules+=\" ostree \" is missing from dracut.conf.d"
+  fi
+  chmod 0600 "/usr/lib/modules/$kver/initramfs.img"
+  rm -f /tmp/kestrel-dracut.log
+fi
+
+# 8. Invariants bootc lint cares about.
+n=$(find /usr/lib/modules -mindepth 1 -maxdepth 1 -type d | wc -l)
+[[ $n -eq 1 ]] || die "expected one kernel directory under /usr/lib/modules, found $n"
+if [[ -d /boot ]] && [[ -n $(find /boot -mindepth 1 -maxdepth 1 ! -name '.keep' ! -name 'efi' ! -name 'grub2' 2>/dev/null) ]]; then
+  say "cleaning /boot (bootc wants it empty)"
+  find /boot -mindepth 1 -maxdepth 1 ! -name 'efi' ! -name 'grub2' -exec rm -rf {} +
+fi
+# The manifest and cert stay in the image for auditing.
+install -d /usr/share/kestrel
+install -m 0644 "$manifest" /usr/share/kestrel/manifest.json
+install -m 0644 "$src/usr/share/kestrel/kestrel.crt" /usr/share/kestrel/kestrel.crt
+[[ -f $rpm_key ]] && install -m 0644 "$rpm_key" /usr/share/kestrel/RPM-GPG-KEY-kestrel
+say "done: $(uname -m) kernel $kver, nvidia $nvver, $( [[ $do_initramfs -eq 1 ]] && echo 'initramfs generated' || echo 'no initramfs' )"
