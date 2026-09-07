@@ -130,51 +130,11 @@ depmod -b "$stage/usr" -e -F "$src/System.map" "$kver" 2>&1 | tee "$out/depmod.l
 # module tree; kestrel-install runs depmod again after everything is in place.
 endgroup
 
-group "File lists"
-core_list="$out/files.core"; devel_list="$out/files.devel"; nv_list="$out/files.nvidia"
-(
-  cd "$stage" || exit 1
-  find "usr/lib/modules/$kver" -mindepth 1 -maxdepth 1 ! -name extra ! -name build | sed 's|^|/|'
-  echo "%dir /usr/lib/modules/$kver"
-  echo "/usr/share/kestrel/LICENSES/GPL-2.0-only.kernel.txt"
-  echo "/usr/share/kestrel/LICENSES/Apache-2.0.kestrel.txt"
-  echo "/usr/share/kestrel/kestrel.crt"
-  echo "%dir /usr/share/kestrel"
-  echo "%dir /usr/share/kestrel/LICENSES"
-  echo "/usr/share/doc/kestrel-kernel"
-) >"$core_list"
-{
-  echo "/usr/src/kernels/$kver"
-  echo "/usr/lib/modules/$kver/build"
-} >"$devel_list"
-{
-  echo "/usr/lib/modules/$kver/extra"
-  echo "/usr/share/licenses/kestrel-nvidia-kmod"
-  echo "/usr/share/kestrel/LICENSES/nvidia-open-gpu-kernel-modules.COPYING.txt"
-} >"$nv_list"
-endgroup
-
 group "rpmbuild"
-top=$(mktemp -d "${TMPDIR:-/tmp}/kestrel-rpm.XXXXXX")
-mkdir -p "$top"/{BUILD,RPMS,SPECS,SOURCES,SRPMS,BUILDROOT}
 krelease=$(jget "$want" .kernel.rpm_release)
 [[ "${kversion}-${krelease}.x86_64" == "$kver" ]] || die "rpm_release $krelease does not reproduce kver $kver"
 nvrelease="1.k${kversion//./_}_${tagrel}.kestrel.fc${rel}"
-# RPM v4 package format: installable by rpm >= 4.14, so older Fedora bases work too.
-common=(--define "_topdir $top" --define "_rpmformat 4" --define "kestrel_stage $stage" --define "kver $kver" --define "channel $channel" --define "dist .fc${rel}")
-rpmbuild -bb "${common[@]}" --define "kversion $kversion" --define "krelease $krelease" \
-  --define "filelist_core $core_list" --define "filelist_devel $devel_list" \
-  --define "_rpmfilename kestrel-kernel/%%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm" \
-  "$KESTREL_ROOT/rpm/kestrel-kernel.spec" >"$out/rpmbuild-kernel.log" 2>&1 \
-  || { tail -40 "$out/rpmbuild-kernel.log" >&2; die "rpmbuild kernel failed"; }
-# Both specs see the whole stage; each file list picks its own files.
-rpmbuild -bb "${common[@]}" --define "nvver $nvver" --define "nvrelease $nvrelease" \
-  --define "filelist $nv_list" \
-  --define "_rpmfilename kestrel-nvidia-kmod/%%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm" \
-  "$KESTREL_ROOT/rpm/kestrel-nvidia-kmod.spec" >"$out/rpmbuild-nvidia.log" 2>&1 \
-  || { tail -40 "$out/rpmbuild-nvidia.log" >&2; die "rpmbuild nvidia failed"; }
-mkdir -p "$out/rpms"
-find "$top/RPMS" -name '*.rpm' -exec mv -t "$out/rpms" {} +
+kestrel_rpmbuild "$stage" "$kver" "$kversion" "$krelease" "$nvver" "$nvrelease" "$channel" "$rel" "$out"
 endgroup
 
 group "Sign RPMs"
@@ -248,4 +208,4 @@ cp -a "$stage/usr/share/kestrel/LICENSES" "$out/LICENSES"
 jq -c '{channel, kver, build_id, nvidia: .nvidia.version, signing: .signing.key}' "$out/manifest.json"
 endgroup
 
-rm -rf "$stage" "$top"
+rm -rf "$stage"

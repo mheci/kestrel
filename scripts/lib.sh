@@ -79,3 +79,54 @@ kestrel_tree_hash() {
       -type f -print0 2>/dev/null | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
   )
 }
+
+# File lists for the three RPMs, from a staging root. Shared by package.sh and
+# test/standin.sh so a stand-in has exactly the shape of a real build.
+#   kestrel_file_lists STAGE KVER OUTDIR  -> OUTDIR/files.{core,devel,nvidia}
+kestrel_file_lists() {
+  local stage=$1 kver=$2 outdir=$3
+  (
+    cd "$stage" || exit 1
+    find "usr/lib/modules/$kver" -mindepth 1 -maxdepth 1 ! -name extra ! -name build | sed 's|^|/|'
+    echo "%dir /usr/lib/modules/$kver"
+    echo "/usr/share/kestrel/LICENSES/GPL-2.0-only.kernel.txt"
+    echo "/usr/share/kestrel/LICENSES/Apache-2.0.kestrel.txt"
+    echo "/usr/share/kestrel/kestrel.crt"
+    echo "%dir /usr/share/kestrel"
+    echo "%dir /usr/share/kestrel/LICENSES"
+    echo "/usr/share/doc/kestrel-kernel"
+  ) >"$outdir/files.core"
+  {
+    echo "/usr/src/kernels/$kver"
+    echo "/usr/lib/modules/$kver/build"
+  } >"$outdir/files.devel"
+  {
+    echo "/usr/lib/modules/$kver/extra"
+    echo "/usr/share/licenses/kestrel-nvidia-kmod"
+    echo "/usr/share/kestrel/LICENSES/nvidia-open-gpu-kernel-modules.COPYING.txt"
+  } >"$outdir/files.nvidia"
+}
+
+# rpmbuild the two specs from a staging root.
+#   kestrel_rpmbuild STAGE KVER KVERSION KRELEASE NVVER NVRELEASE CHANNEL REL OUTDIR
+# Leaves the RPMs in OUTDIR/rpms and logs in OUTDIR.
+kestrel_rpmbuild() {
+  local stage=$1 kver=$2 kversion=$3 krelease=$4 nvver=$5 nvrelease=$6 channel=$7 rel=$8 outdir=$9
+  local top
+  top=$(mktemp -d "${TMPDIR:-/tmp}/kestrel-rpm.XXXXXX")
+  mkdir -p "$top"/{BUILD,RPMS,SPECS,SOURCES,SRPMS,BUILDROOT} "$outdir/rpms"
+  kestrel_file_lists "$stage" "$kver" "$outdir"
+  # RPM v4 package format: installable by rpm >= 4.14, so older Fedora bases work too.
+  local common=(--define "_topdir $top" --define "_rpmformat 4" --define "kestrel_stage $stage"
+                --define "kver $kver" --define "channel $channel" --define "dist .fc${rel}")
+  rpmbuild -bb "${common[@]}" --define "kversion $kversion" --define "krelease $krelease" \
+    --define "filelist_core $outdir/files.core" --define "filelist_devel $outdir/files.devel" \
+    "$KESTREL_ROOT/rpm/kestrel-kernel.spec" >"$outdir/rpmbuild-kernel.log" 2>&1 \
+    || { tail -40 "$outdir/rpmbuild-kernel.log" >&2; die "rpmbuild kernel failed"; }
+  rpmbuild -bb "${common[@]}" --define "nvver $nvver" --define "nvrelease $nvrelease" \
+    --define "filelist $outdir/files.nvidia" \
+    "$KESTREL_ROOT/rpm/kestrel-nvidia-kmod.spec" >"$outdir/rpmbuild-nvidia.log" 2>&1 \
+    || { tail -40 "$outdir/rpmbuild-nvidia.log" >&2; die "rpmbuild nvidia failed"; }
+  find "$top/RPMS" -name '*.rpm' -exec mv -t "$outdir/rpms" {} +
+  rm -rf "$top"
+}

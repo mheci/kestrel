@@ -59,8 +59,13 @@ command -v depmod >/dev/null || die "kmod (depmod) is required"
 kver=$(jq -r .kver "$manifest")
 nvver=$(jq -r .nvidia.version "$manifest")
 channel=$(jq -r .channel "$manifest")
+standin=$(jq -r '.standin // false' "$manifest")
 [[ -n $kver && $kver != null ]] || die "manifest has no kver"
 say "channel=$channel kver=$kver nvidia=$nvver"
+if [[ $standin == true ]]; then
+  say "warning: this is a stand-in artifact (CI dry run), not a kernel; skipping depmod and dracut"
+  do_initramfs=0
+fi
 
 rpmdir="$src/rpms"
 kernel_rpm=$(ls "$rpmdir"/kestrel-kernel-[0-9]*.rpm 2>/dev/null | head -1)
@@ -130,8 +135,10 @@ rpm -q kestrel-kernel kestrel-nvidia-kmod >/dev/null || die "rpm install failed"
 
 # 5. depmod.
 [[ -f /usr/lib/modules/$kver/vmlinuz ]] || die "vmlinuz missing after install"
-depmod -a -e -F "/usr/lib/modules/$kver/System.map" "$kver" || die "depmod failed"
-modinfo -k "$kver" nvidia >/dev/null 2>&1 || die "nvidia module not visible to modinfo"
+if [[ $standin != true ]]; then
+  depmod -a -e -F "/usr/lib/modules/$kver/System.map" "$kver" || die "depmod failed"
+  modinfo -k "$kver" nvidia >/dev/null 2>&1 || die "nvidia module not visible to modinfo"
+fi
 
 # 6. dnf guard.
 if [[ $do_guard -eq 1 ]]; then

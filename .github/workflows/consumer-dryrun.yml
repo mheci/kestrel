@@ -1,11 +1,19 @@
-# Dry run of the consumer side without a kestrel build: on the kinoite base,
-# resolve the Terra NVIDIA transaction against a stand-in kestrel-nvidia-kmod
-# (empty payload, same provides), and exercise kestrel-install's rpm removal
-# and dnf guard logic. Finds dependency and tooling mistakes in minutes rather
-# than after a five hour compile.
+# Consumer path without a kernel build. test/standin.sh makes RPMs with the
+# real specs and provides but placeholder payloads; the real artifact
+# Containerfile wraps them; the real reference Containerfile runs the Terra
+# transaction and kestrel-install on the kinoite base. Everything after the
+# compile is exercised in minutes; only depmod, dracut, lint and boot need a
+# real kernel and are left to the channel workflow.
 name: consumer dry run
 on:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: channel
+        required: false
+        default: stable
+        type: choice
+        options: [stable, lts]
 
 permissions:
   contents: read
@@ -22,55 +30,47 @@ jobs:
         id: r
         env:
           GH_TOKEN: ${{ github.token }}
-        run: scripts/resolve.sh stable want
-      - name: Stand-in kestrel-nvidia-kmod RPM
+        run: scripts/resolve.sh "${{ inputs.channel }}" want
+      - name: Stand-in RPMs (real specs, placeholder payload)
         run: |
           podman build -q --build-arg FEDORA_RELEASE=${{ steps.r.outputs.fedora_release }} \
             -t localhost/kestrel-builder:dry -f containers/Containerfile.builder containers/
-          mkdir -p out/rpms
-          podman run --rm --security-opt label=disable -v "$PWD:/repo" -w /repo localhost/kestrel-builder:dry bash -c '
-            set -e
-            stage=$(mktemp -d); mkdir -p $stage/usr/lib/modules/${{ steps.r.outputs.kver }}/extra/nvidia $stage/usr/share/licenses/kestrel-nvidia-kmod
-            echo x > $stage/usr/lib/modules/${{ steps.r.outputs.kver }}/extra/nvidia/README
-            echo x > $stage/usr/share/licenses/kestrel-nvidia-kmod/COPYING
-            mkdir -p $stage/usr/share/kestrel/LICENSES; echo x > $stage/usr/share/kestrel/LICENSES/nvidia-open-gpu-kernel-modules.COPYING.txt
-            printf "%s\n" "/usr/lib/modules/${{ steps.r.outputs.kver }}/extra" "/usr/share/licenses/kestrel-nvidia-kmod" "/usr/share/kestrel/LICENSES/nvidia-open-gpu-kernel-modules.COPYING.txt" > /tmp/nv.list
-            top=$(mktemp -d); mkdir -p $top/{BUILD,RPMS,SPECS,SOURCES,SRPMS,BUILDROOT}
-            rpmbuild -bb --define "_topdir $top" --define "_rpmformat 4" --define "kestrel_stage $stage" \
-              --define "kver ${{ steps.r.outputs.kver }}" --define "channel stable" --define "dist .fc${{ steps.r.outputs.fedora_release }}" \
-              --define "nvver ${{ steps.r.outputs.nvidia_version }}" --define "nvrelease 0.dryrun.fc${{ steps.r.outputs.fedora_release }}" \
-              --define "filelist /tmp/nv.list" rpm/kestrel-nvidia-kmod.spec >/tmp/rb.log 2>&1 || { tail -30 /tmp/rb.log; exit 1; }
-            find $top/RPMS -name "*.rpm" -exec cp {} out/rpms/ \;
-            rpm -qp --provides out/rpms/*.rpm
-          '
-      - name: Terra transaction on the base image
+          podman run --rm --security-opt label=disable -v "$PWD:/repo" -e KESTREL_ROOT=/repo -w /repo \
+            localhost/kestrel-builder:dry bash test/standin.sh want/want.json out
+          cp want/want.json out/want.json
+      - name: Artifact image
         run: |
-          base=$(jq -r .fedora.base_ref want/want.json)
-          digest=$(jq -r .fedora.base_digest want/want.json)
-          nv=${{ steps.r.outputs.nvidia_version }}
-          rel=${{ steps.r.outputs.fedora_release }}
-          podman run --rm --security-opt label=disable -v "$PWD/out:/tmp/kestrel-rpms:ro" -v "$PWD/containers:/tmp/containers:ro" "${base%%:*}@${digest}" bash -c "
-            set -euxo pipefail
-            rpm -q kernel-core
-            dnf5 -y install --nogpgcheck --repofrompath terra,https://repos.fyralabs.com/terra${rel} terra-release >/dev/null
-            dnf5 -y install --enablerepo=terra terra-release-nvidia >/dev/null
-            dnf5 -y install --enablerepo=terra-nvidia --setopt=install_weak_deps=False --exclude=akmod-nvidia,kmod-nvidia \
-              nvidia-driver-${nv} nvidia-driver-libs-${nv} nvidia-kmod-common-${nv} nvidia-driver-cuda-${nv} \
-              nvidia-modprobe nvidia-driver-selinux /tmp/kestrel-rpms/rpms/kestrel-nvidia-kmod-*.rpm 2>&1 | tail -25
-            rpm -q nvidia-driver nvidia-kmod-common kestrel-nvidia-kmod nvidia-driver-selinux
-            rpm -q akmod-nvidia kmod-nvidia && exit 1 || echo 'no akmod/kmod-nvidia: good'
-            echo '--- what requires kernel provides (rpm -e --nodeps candidates)'
-            rpm -q --whatrequires kernel-core kernel kernel-modules kernel-modules-core kernel-modules-extra 'kernel-uname-r' 2>/dev/null | sort -u || true
-            echo '--- kernel removal as kestrel-install does it'
-            rpm -e --noscripts --nodeps kernel kernel-core kernel-modules kernel-modules-core kernel-modules-extra 2>&1 || true
-            rpm -q kernel-core && exit 1 || echo 'fedora kernel gone'
-            ls /usr/lib/modules/
-            echo '--- dracut config in the image'
-            cat /usr/lib/dracut/dracut.conf.d/*.conf | grep -v '^#' | grep -v '^$'
-            dracut --list-modules 2>/dev/null | grep -E '^(ostree|bootc|systemd|plymouth|nvidia)' || true
-            echo '--- dnf guard file syntax'
-            mkdir -p /etc/dnf/libdnf5.conf.d
-            printf '[main]\nexcludepkgs=kernel,kernel-core\n' > /etc/dnf/libdnf5.conf.d/90-kestrel.conf
-            dnf5 -q repoquery kernel-core 2>&1 | head -3 || true
-            dnf5 -q repoquery --installed kestrel-nvidia-kmod
-          "
+          podman build -f containers/Containerfile.artifact \
+            --build-arg KESTREL_CHANNEL=${{ inputs.channel }} \
+            --build-arg KESTREL_KVER=${{ steps.r.outputs.kver }} \
+            --build-arg KESTREL_NVIDIA=${{ steps.r.outputs.nvidia_version }} \
+            --build-arg KESTREL_BUILD_ID=standin \
+            -t localhost/kestrel:standin .
+      - name: Reference image up to kestrel-install (no dracut, no lint)
+        run: |
+          base=$(jq -r .fedora.base_ref out/want.json)
+          digest=$(jq -r .fedora.base_digest out/want.json)
+          # Same file as the real reference image, minus the last RUN (kargs,
+          # cleanup, bootc lint), which needs a real initramfs.
+          awk '/^# What a real consumer adds/{exit} {print}' containers/Containerfile.reference > /tmp/Containerfile.dry
+          podman build -f /tmp/Containerfile.dry \
+            --build-arg BASE_IMAGE="${base%%:*}@${digest}" \
+            --build-arg KESTREL_IMAGE=localhost/kestrel:standin \
+            --build-arg NVIDIA_VERSION=${{ steps.r.outputs.nvidia_version }} \
+            --build-arg FEDORA_RELEASE=${{ steps.r.outputs.fedora_release }} \
+            -t localhost/kestrel-reference:dry .
+      - name: Facts
+        run: |
+          podman run --rm localhost/kestrel-reference:dry bash -c '
+            set -e
+            echo "kernel dirs:"; ls /usr/lib/modules
+            rpm -q kestrel-kernel kestrel-kernel-devel kestrel-nvidia-kmod nvidia-driver nvidia-kmod-common nvidia-driver-selinux
+            rpm -q kernel-core && exit 1 || echo "fedora kernel gone"
+            rpm -q akmod-nvidia kmod-nvidia && exit 1 || echo "no akmod/kmod-nvidia"
+            echo "uname shape: $(rpm -q kestrel-kernel --qf "%{VERSION}-%{RELEASE}.%{ARCH}\n") == $(ls /usr/lib/modules)"
+            echo "dnf guard:"; cat /etc/dnf/libdnf5.conf.d/90-kestrel.conf
+            echo "dnf sees kernel-core as excluded:"; dnf5 -q repoquery kernel-core 2>&1 | head -2 || true
+            echo "dracut config:"; cat /usr/lib/dracut/dracut.conf.d/*.conf | grep -v "^#" | grep -v "^$"
+            echo "kestrel files:"; ls -la /usr/share/kestrel
+            echo "boot:"; ls -A /boot || true
+          '
