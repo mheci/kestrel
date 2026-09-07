@@ -24,6 +24,11 @@ on:
         required: false
         default: true
         type: boolean
+      reuse-run:
+        description: run id whose packaged artifact to prove and publish instead of compiling (debugging aid)
+        required: false
+        default: ""
+        type: string
   workflow_call:
     inputs:
       channel:
@@ -37,6 +42,10 @@ on:
         required: false
         default: true
         type: boolean
+      reuse-run:
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: channel-${{ inputs.channel }}
@@ -87,7 +96,7 @@ jobs:
 
   stage1:
     needs: resolve
-    if: needs.resolve.outputs.already_published != 'true'
+    if: needs.resolve.outputs.already_published != 'true' && inputs.reuse-run == ''
     runs-on: ubuntu-latest
     timeout-minutes: 355
     outputs:
@@ -163,17 +172,23 @@ jobs:
           exit 1
 
   prove:
-    # Runs when any stage reports done. `always()` keeps it alive past the
-    # skipped later stages; the condition then asks for a real success.
+    # Runs when any stage reports done, or when reusing another run's
+    # artifact. `always()` keeps it alive past the skipped later stages; the
+    # condition then asks for a real success.
     needs: [resolve, stage1, stage2, stage3, stage4]
     if: >-
-      always() && needs.resolve.result == 'success' &&
-      (needs.stage1.outputs.kernel_done == 'true' || needs.stage2.outputs.kernel_done == 'true' ||
+      always() && needs.resolve.result == 'success' && needs.resolve.outputs.already_published != 'true' &&
+      (inputs.reuse-run != '' ||
+       needs.stage1.outputs.kernel_done == 'true' || needs.stage2.outputs.kernel_done == 'true' ||
        needs.stage3.outputs.kernel_done == 'true' || needs.stage4.outputs.kernel_done == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     outputs:
       proven: ${{ steps.done.outputs.proven }}
+      build_id: ${{ steps.facts.outputs.build_id }}
+      kver: ${{ steps.facts.outputs.kver }}
+      nvidia_version: ${{ steps.facts.outputs.nvidia_version }}
+      fedora_release: ${{ steps.facts.outputs.fedora_release }}
     steps:
       - uses: actions/checkout@v7
       - name: Reclaim disk (base image, its export and the ext4 disk all live on /)
@@ -182,13 +197,31 @@ jobs:
           df -h / | tail -1
       - uses: actions/download-artifact@v8
         with:
-          name: kestrel-${{ inputs.channel }}-${{ needs.resolve.outputs.build_id }}
+          pattern: kestrel-${{ inputs.channel }}-*
+          merge-multiple: true
           path: out
+          run-id: ${{ inputs.reuse-run || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Artifact facts
+        id: facts
+        run: |
+          test -f out/manifest.json || { echo "::error::no manifest in the packaged artifact"; ls -la out; exit 1; }
+          jq -c '{channel, kver, build_id, nvidia: .nvidia.version, fedora: .fedora.release, signing: .signing.key, rpm_sig: .signing.rpm.key}' out/manifest.json
+          [ "$(jq -r .channel out/manifest.json)" = "${{ inputs.channel }}" ] || { echo "::error::artifact is for another channel"; exit 1; }
+          {
+            echo "build_id=$(jq -r .build_id out/manifest.json)"
+            echo "kver=$(jq -r .kver out/manifest.json)"
+            echo "nvidia_version=$(jq -r .nvidia.version out/manifest.json)"
+            echo "fedora_release=$(jq -r .fedora.release out/manifest.json)"
+          } >>"$GITHUB_OUTPUT"
+          if [ "$(jq -r .build_id out/manifest.json)" != "${{ needs.resolve.outputs.build_id }}" ]; then
+            echo "::warning::artifact build_id $(jq -r .build_id out/manifest.json) differs from the current resolve ${{ needs.resolve.outputs.build_id }} (reused artifact or changed tree); the next poll will rebuild"
+          fi
       - name: Static verification (again, on the artifact as uploaded)
         # Same Fedora builder image as the build, so rpm, depmod and sbverify
         # are the versions consumers get and rpm 6 reads the v4 packages.
         run: |
-          podman build -q --build-arg FEDORA_RELEASE=${{ needs.resolve.outputs.fedora_release }} \
+          podman build -q --build-arg FEDORA_RELEASE=${{ steps.facts.outputs.fedora_release }} \
             -t localhost/kestrel-builder:prove -f containers/Containerfile.builder containers/
           podman run --rm --security-opt label=disable -v "$PWD:/repo" -e KESTREL_ROOT=/repo -w /repo \
             localhost/kestrel-builder:prove bash test/verify-static.sh /repo/out
@@ -196,9 +229,9 @@ jobs:
         run: |
           sudo podman build -f containers/Containerfile.artifact \
             --build-arg KESTREL_CHANNEL=${{ inputs.channel }} \
-            --build-arg KESTREL_KVER=${{ needs.resolve.outputs.kver }} \
-            --build-arg KESTREL_NVIDIA=${{ needs.resolve.outputs.nvidia_version }} \
-            --build-arg KESTREL_BUILD_ID=${{ needs.resolve.outputs.build_id }} \
+            --build-arg KESTREL_KVER=${{ steps.facts.outputs.kver }} \
+            --build-arg KESTREL_NVIDIA=${{ steps.facts.outputs.nvidia_version }} \
+            --build-arg KESTREL_BUILD_ID=${{ steps.facts.outputs.build_id }} \
             -t localhost/kestrel:build .
           sudo podman image inspect localhost/kestrel:build --format 'artifact size {{.Size}} bytes, {{len .RootFS.Layers}} layers'
       - name: Build reference image (kinoite-main + Terra nvidia + kestrel-install)
@@ -208,8 +241,8 @@ jobs:
           sudo podman build -f containers/Containerfile.reference \
             --build-arg BASE_IMAGE="${base%%:*}@${digest}" \
             --build-arg KESTREL_IMAGE=localhost/kestrel:build \
-            --build-arg NVIDIA_VERSION=${{ needs.resolve.outputs.nvidia_version }} \
-            --build-arg FEDORA_RELEASE=${{ needs.resolve.outputs.fedora_release }} \
+            --build-arg NVIDIA_VERSION=${{ steps.facts.outputs.nvidia_version }} \
+            --build-arg FEDORA_RELEASE=${{ steps.facts.outputs.fedora_release }} \
             -t localhost/kestrel-reference:build .
       - name: Reference image facts
         run: |
@@ -222,7 +255,12 @@ jobs:
             rpm -q kernel-core && exit 1 || echo "fedora kernel gone"
             echo "dnf guard:"; cat /etc/dnf/libdnf5.conf.d/90-kestrel.conf
             echo "dnf sees kernel-core as excluded:"; dnf5 -q repoquery kernel-core 2>&1 | head -2 || true
-            echo "initramfs (ostree in, nvidia out per Terra 99-nvidia.conf):"; lsinitrd /usr/lib/modules/*/initramfs.img 2>/dev/null | grep -E "nvidia.*\.ko|ostree-prepare-root|bootc-root-setup" | head -8; lsinitrd /usr/lib/modules/*/initramfs.img 2>/dev/null | grep -q ostree-prepare-root
+            echo "initramfs (ostree and bootc in, nvidia out per Terra 99-nvidia.conf):"
+            lsinitrd /usr/lib/modules/*/initramfs.img >/tmp/lsinitrd.txt 2>/dev/null
+            grep -E "nvidia.*\.ko|ostree-prepare-root|bootc-root-setup|initramfs-setup" /tmp/lsinitrd.txt | head -8
+            grep -q "usr/lib/ostree/ostree-prepare-root" /tmp/lsinitrd.txt
+            grep -q "usr/lib/bootc/initramfs-setup" /tmp/lsinitrd.txt
+            grep -E "nvidia.*\.ko" /tmp/lsinitrd.txt && exit 1 || echo "no nvidia modules in the initramfs (early KMS is a consumer choice)"
             echo "kargs:"; cat /usr/lib/bootc/kargs.d/*.toml
             bootc container lint
           '
@@ -238,7 +276,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: proof-${{ inputs.channel }}-${{ needs.resolve.outputs.build_id }}
+          name: proof-${{ inputs.channel }}-${{ steps.facts.outputs.build_id }}-${{ github.run_id }}
           path: |
             out/boot-console.log
             out/boot-result.json
@@ -249,7 +287,7 @@ jobs:
         run: sudo podman save --format oci-archive -o kestrel-image.tar localhost/kestrel:build && sudo chown "$(id -u)" kestrel-image.tar
       - uses: actions/upload-artifact@v7
         with:
-          name: image-${{ inputs.channel }}-${{ needs.resolve.outputs.build_id }}
+          name: image-${{ inputs.channel }}-${{ github.run_id }}
           path: kestrel-image.tar
           retention-days: 3
           compression-level: 0
@@ -265,20 +303,23 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
-          name: image-${{ inputs.channel }}-${{ needs.resolve.outputs.build_id }}
+          name: image-${{ inputs.channel }}-${{ github.run_id }}
       - uses: sigstore/cosign-installer@v4
       - name: Login
-        run: podman login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+        # podman push reads podman's auth.json; cosign reads the docker config.
+        run: |
+          podman login ghcr.io -u "${{ github.actor }}" -p "${{ secrets.GITHUB_TOKEN }}"
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Tags
         id: tags
         run: |
           ch=${{ inputs.channel }}
-          kver=${{ needs.resolve.outputs.kver }}
-          nv=${{ needs.resolve.outputs.nvidia_version }}
+          kver=${{ needs.prove.outputs.kver }}
+          nv=${{ needs.prove.outputs.nvidia_version }}
           # kver 7.2.3-2.cachyos.fc44.x86_64 -> kv 7.2.3-2 (CachyOS version and tag release)
           kv=$(sed -E 's/^([0-9.]+-[0-9]+)\..*$/\1/' <<<"$kver")
           [[ $kv =~ ^[0-9.]+-[0-9]+$ ]] || { echo "cannot derive kv from $kver"; exit 1; }
-          tags="$ch $ch-$kv-$nv $ch-$kver $ch-$kv $ch-fc${{ needs.resolve.outputs.fedora_release }}"
+          tags="$ch $ch-$kv-$nv $ch-$kver $ch-$kv $ch-fc${{ needs.prove.outputs.fedora_release }}"
           echo "tags=$tags" >>"$GITHUB_OUTPUT"; echo "$tags"
       - name: Push
         id: push
@@ -321,7 +362,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          scripts/issue.sh close "${{ inputs.channel }}" "Published ${{ needs.resolve.outputs.kver }} with NVIDIA ${{ needs.resolve.outputs.nvidia_version }} as $IMAGE@${{ steps.push.outputs.digest }} in run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}."
+          scripts/issue.sh close "${{ inputs.channel }}" "Published ${{ needs.prove.outputs.kver }} with NVIDIA ${{ needs.prove.outputs.nvidia_version }} as $IMAGE@${{ steps.push.outputs.digest }} in run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}."
 
   report-failure:
     needs: [resolve, stage1, stage2, stage3, stage4, prove, publish]

@@ -134,7 +134,7 @@ runs:
       if: failure()
       uses: actions/upload-artifact@v7
       with:
-        name: kestrel-${{ inputs.channel }}-buildlog-${{ github.run_id }}-${{ github.job }}
+        name: buildlog-${{ inputs.channel }}-${{ github.run_id }}-${{ github.job }}
         path: |
           work/linux/kestrel-make.log
           work/linux/kestrel-prepare.json

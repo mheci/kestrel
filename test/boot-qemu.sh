@@ -38,7 +38,7 @@ trap 'rm -rf "$work"' EXIT
 group "Export rootfs from $image"
 cid=$(podman create "$image" /bin/true)
 mkdir -p "$work/rootfs"
-podman export "$cid" | tar -x -C "$work/rootfs" --exclude='./sysroot' --exclude='./proc/*' --exclude='./sys/*' -f -
+podman export "$cid" | tar -x -C "$work/rootfs" -f -
 podman rm -f "$cid" >/dev/null
 # The image's kernel and the initramfs its dracut built.
 [[ -f $work/rootfs/usr/lib/modules/$kver/vmlinuz && -f $work/rootfs/usr/lib/modules/$kver/initramfs.img ]] || die "kernel or initramfs missing in image"
@@ -132,7 +132,7 @@ timeout_s=${KESTREL_BOOT_TIMEOUT:-900}
 [[ $accel == tcg ]] && timeout_s=$(( timeout_s * 2 ))
 set +e
 timeout --kill-after=20 "$timeout_s" qemu-system-x86_64 \
-  -accel "$accel" -cpu "$cpu" -smp 2 -m 3072 -machine q35 -nographic -no-reboot \
+  -accel "$accel" -cpu "$cpu" -smp 2 -m 3072 -machine q35 -no-reboot \
   -kernel "$work/vmlinuz" -initrd "$work/initrd" \
   -append "root=/dev/vda rw rootfstype=ext4 console=ttyS0,115200n8 systemd.journald.forward_to_console=0 module.sig_enforce=1 selinux=1 enforcing=0 systemd.unit=multi-user.target rd.driver.blacklist=nouveau modprobe.blacklist=nouveau nvidia-drm.modeset=1 loglevel=4 printk.devkmsg=on" \
   -drive "file=$disk,format=raw,if=virtio,cache=unsafe" \
