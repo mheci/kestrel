@@ -65,18 +65,79 @@ case "$primary_href" in
   *.xz) xz -dc "$out/primary.bin" >"$out/primary.xml" ;;
   *) cp "$out/primary.bin" "$out/primary.xml" ;;
 esac
+# Highest EVR wins when the repo carries more than one nvidia-driver build
+# (dnf would pick the same one). The comparison is rpm's: split into digit
+# and alpha runs, numeric runs compare as numbers, tilde sorts before
+# anything, caret after everything except a longer string.
 python3 - "$out/primary.xml" >"$out/terra.json" <<'EOF'
-import json, sys, xml.etree.ElementTree as ET
+import json, re, sys, xml.etree.ElementTree as ET
+
+def rpmvercmp(a, b):
+    if a == b:
+        return 0
+    ia = ib = 0
+    while ia < len(a) or ib < len(b):
+        while ia < len(a) and not a[ia].isalnum() and a[ia] not in "~^":
+            ia += 1
+        while ib < len(b) and not b[ib].isalnum() and b[ib] not in "~^":
+            ib += 1
+        ta = a[ia] if ia < len(a) else ""
+        tb = b[ib] if ib < len(b) else ""
+        if ta == "~" or tb == "~":
+            if ta != "~":
+                return 1
+            if tb != "~":
+                return -1
+            ia += 1; ib += 1
+            continue
+        if ta == "^" or tb == "^":
+            if ia >= len(a):
+                return -1
+            if ib >= len(b):
+                return 1
+            if ta != "^":
+                return 1
+            if tb != "^":
+                return -1
+            ia += 1; ib += 1
+            continue
+        if ia >= len(a) or ib >= len(b):
+            break
+        pat = r"[0-9]+" if a[ia].isdigit() else r"[A-Za-z]+"
+        ma = re.match(pat, a[ia:]); mb = re.match(pat, b[ib:])
+        if mb is None:
+            return 1 if a[ia].isdigit() else -1
+        sa, sb = ma.group(0), mb.group(0)
+        ia += len(sa); ib += len(sb)
+        if a[ia - len(sa)].isdigit():
+            sa, sb = sa.lstrip("0") or "0", sb.lstrip("0") or "0"
+            if len(sa) != len(sb):
+                return 1 if len(sa) > len(sb) else -1
+        if sa != sb:
+            return 1 if sa > sb else -1
+    if ia >= len(a) and ib >= len(b):
+        return 0
+    return -1 if ia >= len(a) else 1
+
+def evrcmp(x, y):
+    for k in ("epoch", "version", "release"):
+        c = rpmvercmp(x[k], y[k])
+        if c:
+            return c
+    return 0
+
 ns = {"c": "http://linux.duke.edu/metadata/common"}
 root = ET.parse(sys.argv[1]).getroot()
-found = {}
+found = None
 for p in root.findall("c:package", ns):
     name = p.find("c:name", ns).text
     arch = p.find("c:arch", ns).text
     if name == "nvidia-driver" and arch == "x86_64":
         v = p.find("c:version", ns)
-        found = {"name": name, "epoch": v.get("epoch"), "version": v.get("ver"), "release": v.get("rel"),
-                 "location": p.find("c:location", ns).get("href")}
+        cand = {"name": name, "epoch": v.get("epoch") or "0", "version": v.get("ver"), "release": v.get("rel"),
+                "location": p.find("c:location", ns).get("href")}
+        if found is None or evrcmp(cand, found) > 0:
+            found = cand
 if not found:
     sys.exit("nvidia-driver.x86_64 not found in Terra primary metadata")
 json.dump(found, sys.stdout, indent=2)
