@@ -281,7 +281,8 @@ jobs:
         env:
           KESTREL_BOOT_TIMEOUT: "900"
         run: |
-          sudo apt-get install -y -qq qemu-system-x86 ovmf e2fsprogs >/dev/null
+          sudo apt-get update -qq >/dev/null
+          sudo apt-get install -y -qq qemu-system-x86 e2fsprogs >/dev/null
           chmod +x test/*.sh scripts/*.sh
           sudo -E test/boot-qemu.sh localhost/kestrel-reference:build out
           sudo chown -R "$(id -u)" out
@@ -292,6 +293,7 @@ jobs:
           name: proof-${{ inputs.channel }}-${{ steps.facts.outputs.build_id }}-${{ github.run_id }}
           path: |
             out/boot-console.log
+            out/boot-dmesg.log
             out/boot-result.json
             out/manifest.json
           if-no-files-found: ignore
