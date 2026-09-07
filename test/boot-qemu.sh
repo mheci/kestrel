@@ -49,41 +49,34 @@ endgroup
 
 group "Guest check unit"
 mkdir -p "$work/rootfs/var/kestrel-boot" "$work/rootfs/etc/systemd/system/multi-user.target.wants"
-cat >"$work/rootfs/usr/libexec/kestrel-boot-check" <<EOF
+# The guest writes one plain file per fact under /var/kestrel-boot; the host
+# reads them back with debugfs and builds the JSON. No quoting of dmesg
+# output inside the guest that way.
+cat >"$work/rootfs/usr/libexec/kestrel-boot-check" <<'EOF'
 #!/bin/bash
-# Runs once inside the guest; writes /var/kestrel-boot/result.json then powers off.
+# Runs once inside the guest; writes facts to /var/kestrel-boot then powers off.
 set -u
-res=/var/kestrel-boot/result.json
-r() { printf '%s\n' "\$1"; }
-uname_r=\$(uname -r)
-selinux_fs=\$(test -d /sys/fs/selinux && echo mounted || echo missing)
-selinux_mode=\$(cat /sys/fs/selinux/enforce 2>/dev/null || echo n/a)
-sig_enforce=\$(cat /sys/module/module/parameters/sig_enforce 2>/dev/null || echo n/a)
-# Load a signed in-tree module that has no hardware dependency.
-modprobe loop 2>/tmp/loop.err && loop=ok || loop="fail: \$(cat /tmp/loop.err)"
-# NVIDIA: dependency resolution through modprobe (there is no GPU in QEMU, so
-# nvidia.ko itself will refuse to init; the interesting part is that the
-# module and its whole chain load, verify and get past signature checks).
-modprobe --dry-run --show-depends nvidia-drm >/tmp/nvdep.txt 2>&1 && nvdep=ok || nvdep="fail: \$(cat /tmp/nvdep.txt)"
-modprobe nvidia 2>/tmp/nv.err; nv_rc=\$?
-nv_err=\$(cat /tmp/nv.err)
-nv_dmesg=\$(dmesg | grep -i -E 'nvidia|NVRM' | tail -20 | sed 's/"/\\\\"/g')
-sig_fail=\$(dmesg | grep -i -c -E 'module verification failed|Loading of unsigned module|PKCS#7 signature not signed|signature.*invalid' || true)
-taint=\$(cat /proc/sys/kernel/tainted)
-cmdline=\$(cat /proc/cmdline)
-btf=\$(test -f /sys/kernel/btf/vmlinux && echo present || echo missing)
-cpu_flags_ok=\$(grep -q -w avx2 /proc/cpuinfo && echo v3-capable || echo no-avx2)
-python3 - <<PY >"\$res" 2>/dev/null || cat >"\$res" <<JSON
-import json
-json.dump({
- "uname_r": "\$uname_r", "selinux_fs": "\$selinux_fs", "selinux_enforce": "\$selinux_mode",
- "sig_enforce": "\$sig_enforce", "loop_module": """\$loop""", "nvidia_depends": """\$nvdep""",
- "nvidia_modprobe_rc": \$nv_rc, "nvidia_modprobe_err": """\$nv_err""", "nvidia_dmesg": """\$nv_dmesg""",
- "signature_failures_in_dmesg": \$sig_fail, "tainted": \$taint, "btf": "\$btf", "cpu": "\$cpu_flags_ok",
- "cmdline": "\$cmdline"}, open("\$res", "w"), indent=1)
-PY
-{"uname_r": "\$uname_r", "selinux_fs": "\$selinux_fs", "sig_enforce": "\$sig_enforce", "loop_module": "\$loop", "nvidia_depends": "\$nvdep", "nvidia_modprobe_rc": \$nv_rc, "signature_failures_in_dmesg": \$sig_fail, "tainted": \$taint, "btf": "\$btf", "fallback": true}
-JSON
+d=/var/kestrel-boot
+f() { printf '%s\n' "$2" >"$d/$1"; }
+f uname_r "$(uname -r)"
+f selinux_fs "$(test -d /sys/fs/selinux && echo mounted || echo missing)"
+f selinux_enforce "$(cat /sys/fs/selinux/enforce 2>/dev/null || echo n/a)"
+f sig_enforce "$(cat /sys/module/module/parameters/sig_enforce 2>/dev/null || echo n/a)"
+# A signed in-tree module with no hardware dependency.
+if modprobe loop 2>"$d/loop.err"; then f loop_module ok; else f loop_module "fail: $(cat "$d/loop.err")"; fi
+# NVIDIA: dependency resolution through modprobe (no GPU in QEMU, so
+# nvidia.ko itself refuses to init; the point is that the module and its
+# whole chain are found, verified and get past the signature checks).
+if modprobe --dry-run --show-depends nvidia-drm >"$d/nvidia_depends.txt" 2>&1; then f nvidia_depends ok; else f nvidia_depends "fail: $(cat "$d/nvidia_depends.txt")"; fi
+modprobe nvidia 2>"$d/nvidia_modprobe_err"; f nvidia_modprobe_rc "$?"
+dmesg | grep -i -E 'nvidia|NVRM' | tail -20 >"$d/nvidia_dmesg" || true
+f signature_failures_in_dmesg "$(dmesg | grep -i -c -E 'module verification failed|Loading of unsigned module|PKCS#7 signature not signed|signature.*invalid' || true)"
+f tainted "$(cat /proc/sys/kernel/tainted)"
+f cmdline "$(cat /proc/cmdline)"
+f btf "$(test -f /sys/kernel/btf/vmlinux && echo present || echo missing)"
+f cpu "$(grep -q -w avx2 /proc/cpuinfo && echo v3-capable || echo no-avx2)"
+dmesg >"$d/dmesg.txt" 2>/dev/null || true
+f finished yes
 echo "KESTREL-BOOT-CHECK-DONE"
 sync
 systemctl poweroff
@@ -105,7 +98,7 @@ ln -sf ../kestrel-boot-check.service "$work/rootfs/etc/systemd/system/multi-user
 # A plain container rootfs has no fstab, machine-id or root password; give it
 # what a first boot needs and nothing more.
 : >"$work/rootfs/etc/machine-id"
-printf '/dev/vda / ext4 defaults 0 1\n' >"$work/rootfs/etc/fstab"
+printf '/dev/vda / ext4 defaults 0 0\n' >"$work/rootfs/etc/fstab"
 # Getty on serial for debugging in the console log; no login needed.
 mkdir -p "$work/rootfs/etc/systemd/system/serial-getty@ttyS0.service.d"
 # Do not let display managers or NetworkManager slow a headless boot.
@@ -144,16 +137,21 @@ log "qemu exited $qrc ($accel)"
 endgroup
 
 group "Result"
-mkdir -p "$work/mnt"
 res="$out/boot-result.json"
-# Read the result file back from the ext4 image without mounting (debugfs).
-if command -v debugfs >/dev/null; then
-  debugfs -R 'cat /var/kestrel-boot/result.json' "$disk" >"$res" 2>/dev/null || true
+# Read the facts back from the ext4 image without mounting (debugfs).
+fact() { debugfs -R "cat /var/kestrel-boot/$1" "$disk" 2>/dev/null || true; }
+if [[ $(fact finished) != yes ]]; then
+  log "guest wrote no result; last console lines:"; tail -60 "$console" >&2
+  die "guest did not finish the check unit"
 fi
-if [[ ! -s $res ]]; then
-  log "no result file; last console lines:"; tail -60 "$console" >&2
-  die "guest did not write a result"
-fi
+fact dmesg.txt >"$out/boot-dmesg.log"
+jq -n \
+  --arg uname_r "$(fact uname_r)" --arg selinux_fs "$(fact selinux_fs)" --arg selinux_enforce "$(fact selinux_enforce)" \
+  --arg sig_enforce "$(fact sig_enforce)" --arg loop_module "$(fact loop_module)" --arg nvidia_depends "$(fact nvidia_depends)" \
+  --arg nvidia_modprobe_rc "$(fact nvidia_modprobe_rc)" --arg nvidia_modprobe_err "$(fact nvidia_modprobe_err)" \
+  --arg nvidia_dmesg "$(fact nvidia_dmesg)" --arg signature_failures_in_dmesg "$(fact signature_failures_in_dmesg)" \
+  --arg tainted "$(fact tainted)" --arg cmdline "$(fact cmdline)" --arg btf "$(fact btf)" --arg cpu "$(fact cpu)" \
+  '$ARGS.named' >"$res"
 cat "$res"
 pass=0; fail=0
 ok() { pass=$((pass+1)); printf 'PASS %s\n' "$*"; }
