@@ -267,8 +267,10 @@ jobs:
             echo "boot:"; ls -A /boot || true
             rpm -q kestrel-kernel kestrel-kernel-devel kestrel-nvidia-kmod nvidia-driver nvidia-kmod-common
             rpm -q kernel-core && exit 1 || echo "fedora kernel gone"
-            echo "dnf guard:"; cat /etc/dnf/libdnf5.conf.d/90-kestrel.conf
+            echo "dnf guard:"; cat /etc/dnf/libdnf5.conf.d/90-kestrel.conf /etc/dnf/protected.d/kestrel.conf
             echo "dnf sees kernel-core as excluded:"; dnf5 -q repoquery kernel-core 2>&1 | head -2 || true
+            echo "dnf refuses to remove the protected kernel:"; dnf5 -y remove kestrel-kernel >/tmp/rm.txt 2>&1 && exit 1 || grep -i -m1 protected /tmp/rm.txt
+            rpm -q kestrel-kernel
             echo "initramfs (ostree and bootc in, nvidia out per Terra 99-nvidia.conf):"
             lsinitrd /usr/lib/modules/*/initramfs.img >/tmp/lsinitrd.txt 2>/dev/null
             grep -E "nvidia.*\.ko|ostree-prepare-root|bootc-root-setup|initramfs-setup" /tmp/lsinitrd.txt | head -8

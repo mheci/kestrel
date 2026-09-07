@@ -28,14 +28,15 @@
 #      no scriptlets.
 #   5. Runs depmod for the new kernel.
 #   6. Writes a dnf exclude so a later `dnf install foo` cannot pull the Fedora
-#      kernel back (--no-dnf-guard to skip).
+#      kernel back, and marks kestrel-kernel and kestrel-nvidia-kmod as
+#      protected packages (--no-dnf-guard to skip both).
 #   7. Generates the initramfs with the image's own dracut config
 #      (--no-initramfs to skip; bootc requires one to exist before lint).
 #   8. Leaves exactly one directory under /usr/lib/modules and nothing in /boot.
 #
 # Options:
 #   --no-initramfs   skip dracut (you run it later, e.g. after more drivers)
-#   --no-dnf-guard   do not write /etc/dnf/libdnf5.conf.d/90-kestrel.conf
+#   --no-dnf-guard   do not write /etc/dnf/libdnf5.conf.d/90-kestrel.conf or /etc/dnf/protected.d/kestrel.conf
 #   --no-devel       do not install kestrel-kernel-devel
 #   --keep-nvidia-userspace-mismatch  proceed even if nvidia-driver differs (not recommended)
 #   --source DIR     where the kestrel tree was copied (default: the tree this script lives in)
@@ -161,15 +162,19 @@ if [[ $standin != true ]]; then
   modinfo -k "$kver" nvidia >/dev/null 2>&1 || die "nvidia module not visible to modinfo"
 fi
 
-# 6. dnf guard.
+# 6. dnf guard. Two layers: excludepkgs keeps the Fedora kernel and the
+# Terra/RPM Fusion kmods out of any later transaction, and protected
+# packages make dnf refuse a transaction that would remove kestrel-kernel
+# (for example an upgrade that wanted to swap the kmod provider).
 if [[ $do_guard -eq 1 ]]; then
-  mkdir -p /etc/dnf/libdnf5.conf.d
+  mkdir -p /etc/dnf/libdnf5.conf.d /etc/dnf/protected.d
   cat >/etc/dnf/libdnf5.conf.d/90-kestrel.conf <<'EOF'
 # Written by kestrel-install. The kernel in this image comes from
 # ghcr.io/mheci/kestrel; keep dnf from pulling the Fedora kernel back in.
 [main]
 excludepkgs=kernel,kernel-core,kernel-modules,kernel-modules-core,kernel-modules-extra,kernel-devel,kernel-devel-matched,kernel-uki-virt,akmod-nvidia,kmod-nvidia
 EOF
+  printf 'kestrel-kernel\nkestrel-nvidia-kmod\n' >/etc/dnf/protected.d/kestrel.conf
   # dnf4 style for images that still carry it.
   if [[ -f /etc/dnf/dnf.conf ]] && ! grep -q '^excludepkgs=.*kernel-core' /etc/dnf/dnf.conf; then
     printf 'excludepkgs=kernel,kernel-core,kernel-modules,kernel-modules-core,kernel-modules-extra,kernel-devel,akmod-nvidia,kmod-nvidia\n' >>/etc/dnf/dnf.conf
