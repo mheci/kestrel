@@ -6,7 +6,7 @@
 # Produces in OUT_DIR:
 #   rpms/kestrel-kernel-*.rpm, kestrel-kernel-devel-*.rpm, kestrel-nvidia-kmod-*.rpm
 #   manifest.json           provenance and the config delta
-#   kestrel.crt             the public signing certificate
+#   kestrel.crt, kestrel.der  the public signing certificate (PEM, and DER for mokutil)
 #   LICENSES/               GPL-2.0 (kernel), MIT + GPL (NVIDIA), Apache-2.0 (kestrel)
 #
 # Layout inside the RPMs (Fedora shape, so dracut and bootc find everything):
@@ -107,6 +107,10 @@ install -m 0644 "$nv_license" "$stage/usr/share/licenses/kestrel-nvidia-kmod/COP
 install -m 0644 "$nv_license" "$stage/usr/share/kestrel/LICENSES/nvidia-open-gpu-kernel-modules.COPYING.txt"
 install -m 0644 "$KESTREL_ROOT/LICENSE" "$stage/usr/share/kestrel/LICENSES/Apache-2.0.kestrel.txt"
 install -m 0644 "$cert" "$stage/usr/share/kestrel/kestrel.crt"
+# DER copy for `mokutil --import`: enrolling it lets shim boot this vmlinuz
+# under Secure Boot (the modules verify against the same key, built in).
+openssl x509 -in "$cert" -outform DER -out "$stage/usr/share/kestrel/kestrel.der"
+chmod 0644 "$stage/usr/share/kestrel/kestrel.der"
 install -m 0644 "$src/kestrel-final.config" "$stage/usr/share/doc/kestrel-kernel/config-$kver"
 endgroup
 
@@ -204,6 +208,7 @@ jq -n \
     rpms: $rpms
   }' >"$out/manifest.json"
 install -m 0644 "$cert" "$out/kestrel.crt"
+install -m 0644 "$stage/usr/share/kestrel/kestrel.der" "$out/kestrel.der"
 install -m 0644 "$KESTREL_ROOT/keys/RPM-GPG-KEY-kestrel" "$out/RPM-GPG-KEY-kestrel"
 cp -a "$stage/usr/share/kestrel/LICENSES" "$out/LICENSES"
 jq -c '{channel, kver, build_id, nvidia: .nvidia.version, signing: .signing.key}' "$out/manifest.json"

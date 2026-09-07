@@ -4,7 +4,8 @@
 #   /rpms/*.rpm                      kestrel-kernel, -devel, -nvidia-kmod
 #   /usr/libexec/kestrel-install     installer (see its header)
 #   /usr/share/kestrel/manifest.json provenance
-#   /usr/share/kestrel/kestrel.crt   module and vmlinuz signing certificate
+#   /usr/share/kestrel/kestrel.crt   module and vmlinuz signing certificate (PEM)
+#   /usr/share/kestrel/kestrel.der   the same, DER, for `mokutil --import`
 #   /usr/share/kestrel/RPM-GPG-KEY-kestrel  OpenPGP key the RPMs are signed with
 #   /usr/share/kestrel/LICENSES/
 FROM scratch
@@ -13,7 +14,7 @@ ARG KESTREL_KVER
 ARG KESTREL_NVIDIA
 ARG KESTREL_BUILD_ID
 COPY out/rpms/ /rpms/
-COPY out/manifest.json out/kestrel.crt out/RPM-GPG-KEY-kestrel /usr/share/kestrel/
+COPY out/manifest.json out/kestrel.crt out/kestrel.der out/RPM-GPG-KEY-kestrel /usr/share/kestrel/
 COPY out/LICENSES/ /usr/share/kestrel/LICENSES/
 COPY containers/kestrel-install /usr/libexec/kestrel-install
 LABEL org.opencontainers.image.title="kestrel ${KESTREL_CHANNEL}" \

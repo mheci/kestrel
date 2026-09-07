@@ -213,5 +213,6 @@ fi
 install -d /usr/share/kestrel
 install -m 0644 "$manifest" /usr/share/kestrel/manifest.json
 install -m 0644 "$src/usr/share/kestrel/kestrel.crt" /usr/share/kestrel/kestrel.crt
+[[ -f $src/usr/share/kestrel/kestrel.der ]] && install -m 0644 "$src/usr/share/kestrel/kestrel.der" /usr/share/kestrel/kestrel.der
 [[ -f $rpm_key ]] && install -m 0644 "$rpm_key" /usr/share/kestrel/RPM-GPG-KEY-kestrel
 say "done: $(uname -m) kernel $kver, nvidia $nvver, $( [[ $do_initramfs -eq 1 ]] && echo 'initramfs generated' || echo 'no initramfs' )"

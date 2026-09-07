@@ -140,6 +140,7 @@ for r in "$out"/rpms/*.rpm; do
 done
 fpr=$(openssl x509 -in "$cert" -noout -fingerprint -sha256 | cut -d= -f2)
 [[ $(jq -r .signing.certificate.sha256_fingerprint "$manifest") == "$fpr" ]] && ok "manifest cert fingerprint matches kestrel.crt" || bad "cert fingerprint mismatch"
+[[ -f $out/kestrel.der ]] && [[ $(openssl x509 -inform DER -in "$out/kestrel.der" -noout -fingerprint -sha256 | cut -d= -f2) == "$fpr" ]] && ok "kestrel.der is the same certificate (for mokutil)" || bad "kestrel.der missing or different"
 [[ $(jq -r .signing.key "$manifest") == project ]] && ok "signed with the project key" || log "note: signing.key = $(jq -r .signing.key "$manifest")"
 endgroup
 

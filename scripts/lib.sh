@@ -97,6 +97,7 @@ kestrel_file_lists() {
     echo "/usr/share/kestrel/LICENSES/GPL-2.0-only.kernel.txt"
     echo "/usr/share/kestrel/LICENSES/Apache-2.0.kestrel.txt"
     echo "/usr/share/kestrel/kestrel.crt"
+  echo "/usr/share/kestrel/kestrel.der"
     echo "%dir /usr/share/kestrel"
     echo "%dir /usr/share/kestrel/LICENSES"
     echo "/usr/share/doc/kestrel-kernel"

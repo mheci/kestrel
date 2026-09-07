@@ -161,9 +161,14 @@ Retention keeps the current build plus the two previous builds per channel.
 | RPM OpenPGP key (`keys/RPM-GPG-KEY-kestrel`) | `C147 4B73 7BE5 E37F 607F  9570 EE57 9B31 A78D B5C4` |
 
 The certificate is compiled into the kernel's builtin trusted keyring, so
-`module.sig_enforce=1` accepts kestrel modules and nothing else. For Secure
-Boot, enrol `keys/kestrel.crt` as a MOK; `vmlinuz` is signed with the same
-key. Private keys live only in GitHub Actions secrets.
+`module.sig_enforce=1` accepts kestrel modules and nothing else. `vmlinuz`
+is signed with the same key, so a machine with Secure Boot on boots it once
+the certificate is enrolled as a MOK. Every installed image carries the DER
+form at `/usr/share/kestrel/kestrel.der` (also `keys/kestrel.der` here):
+
+    sudo mokutil --import /usr/share/kestrel/kestrel.der   # then reboot and confirm in the MOK manager
+
+Private keys live only in GitHub Actions secrets.
 
 ## Repository map
 

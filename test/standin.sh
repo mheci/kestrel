@@ -42,6 +42,7 @@ for f in GPL-2.0-only.kernel.txt Apache-2.0.kestrel.txt nvidia-open-gpu-kernel-m
 done
 printf 'stand-in\n' >"$stage/usr/share/licenses/kestrel-nvidia-kmod/COPYING"
 cp "$KESTREL_ROOT/keys/kestrel.crt" "$stage/usr/share/kestrel/kestrel.crt"
+cp "$KESTREL_ROOT/keys/kestrel.der" "$stage/usr/share/kestrel/kestrel.der"
 printf 'stand-in\n' >"$stage/usr/share/doc/kestrel-kernel/config-$kver"
 
 nvrelease="0.standin.k${kversion//./_}_${tagrel}.fc${rel}"
@@ -52,6 +53,7 @@ jq -n --slurpfile want "$want" \
     kernel: $want[0].kernel, nvidia: $want[0].nvidia, fedora: $want[0].fedora,
     signing: {key: "none", rpm: {key: "none"}}}' >"$out/manifest.json"
 install -m 0644 "$KESTREL_ROOT/keys/kestrel.crt" "$out/kestrel.crt"
+install -m 0644 "$KESTREL_ROOT/keys/kestrel.der" "$out/kestrel.der"
 install -m 0644 "$KESTREL_ROOT/keys/RPM-GPG-KEY-kestrel" "$out/RPM-GPG-KEY-kestrel"
 cp -a "$stage/usr/share/kestrel/LICENSES" "$out/LICENSES"
 ls -la "$out/rpms"
