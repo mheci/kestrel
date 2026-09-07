@@ -26,9 +26,10 @@ want=$(readlink -f "$want"); cfg=$(readlink -f "$cfg")
 
 srctag=$(jget "$want" .kernel.srctag)
 kver=$(jget "$want" .kernel.version)
-tagrel=$(jget "$want" .kernel.tagrel)
 want_kver=$(jget "$want" .kver)
-suffix=${want_kver#"${kver}-${tagrel}-"}
+# kver is <version>-<localversion>; the kernel appends localversion verbatim.
+localversion=${want_kver#"${kver}-"}
+[[ $localversion != "$want_kver" && -n $localversion ]] || die "kver $want_kver does not start with ${kver}-"
 patchsource=$(jget "$want" .kernel.patchsource)
 source_url=$(jget "$want" .kernel.source_url)
 
@@ -62,9 +63,9 @@ endgroup
 cd "$src" || die "cannot enter $src"
 
 group "Version files"
-# Same mechanism the PKGBUILD uses: localversion files give -<tagrel>-<suffix>.
-printf -- '-%s\n' "$tagrel" >localversion.10-pkgrel
-printf -- '-%s\n' "$suffix" >localversion.20-pkgname
+# Same mechanism the PKGBUILD uses (a localversion file), with the Fedora
+# shaped release string: -<tagrel>.<suffix>.fc<release>.x86_64.
+printf -- '-%s\n' "$localversion" >localversion.10-kestrel
 endgroup
 
 group "Kernel patches"

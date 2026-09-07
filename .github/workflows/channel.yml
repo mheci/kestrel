@@ -275,7 +275,9 @@ jobs:
           ch=${{ inputs.channel }}
           kver=${{ needs.resolve.outputs.kver }}
           nv=${{ needs.resolve.outputs.nvidia_version }}
-          kv=${kver%-cachyos*}   # 7.2.3-2
+          # kver 7.2.3-2.cachyos.fc44.x86_64 -> kv 7.2.3-2 (CachyOS version and tag release)
+          kv=$(sed -E 's/^([0-9.]+-[0-9]+)\..*$/\1/' <<<"$kver")
+          [[ $kv =~ ^[0-9.]+-[0-9]+$ ]] || { echo "cannot derive kv from $kver"; exit 1; }
           tags="$ch $ch-$kv-$nv $ch-$kver $ch-$kv $ch-fc${{ needs.resolve.outputs.fedora_release }}"
           echo "tags=$tags" >>"$GITHUB_OUTPUT"; echo "$tags"
       - name: Push

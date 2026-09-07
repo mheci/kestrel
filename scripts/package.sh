@@ -157,7 +157,8 @@ endgroup
 group "rpmbuild"
 top=$(mktemp -d "${TMPDIR:-/tmp}/kestrel-rpm.XXXXXX")
 mkdir -p "$top"/{BUILD,RPMS,SPECS,SOURCES,SRPMS,BUILDROOT}
-krelease="${tagrel}.kestrel.fc${rel}"
+krelease=$(jget "$want" .kernel.rpm_release)
+[[ "${kversion}-${krelease}.x86_64" == "$kver" ]] || die "rpm_release $krelease does not reproduce kver $kver"
 nvrelease="1.k${kversion//./_}_${tagrel}.kestrel.fc${rel}"
 # RPM v4 package format: installable by rpm >= 4.14, so older Fedora bases work too.
 common=(--define "_topdir $top" --define "_rpmformat 4" --define "kestrel_stage $stage" --define "kver $kver" --define "channel $channel" --define "dist .fc${rel}")

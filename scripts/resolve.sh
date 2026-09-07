@@ -97,7 +97,11 @@ version=$(jget "$out/pkgbuild.json" .version)
 tagrel=$(jget "$out/pkgbuild.json" .tagrel)
 srctag=$(jget "$out/pkgbuild.json" .srctag)
 major=$(jget "$out/pkgbuild.json" .major)
-kver="${version}-${tagrel}-${KESTREL_KVER_SUFFIX}"
+# uname -r in Fedora shape, VERSION-RELEASE.ARCH, so `rpm -q kestrel-kernel
+# --qf '%{VERSION}-%{RELEASE}.%{ARCH}'` equals `uname -r` like it does for the
+# Fedora kernel, and every kmod helper that builds kernel-uname-r from it works.
+krelease="${tagrel}.${KESTREL_KVER_SUFFIX}.fc${fedora_release}"
+kver="${version}-${krelease}.x86_64"
 tree_hash=$(kestrel_tree_hash)
 
 # build_id identifies the set of inputs. Same build_id, same artifact.
@@ -110,6 +114,7 @@ jq -n \
   --arg kernel_version "$version" \
   --arg kernel_major "$major" \
   --arg tagrel "$tagrel" \
+  --arg krelease "$krelease" \
   --arg srctag "$srctag" \
   --arg source_url "https://github.com/CachyOS/linux/releases/download/${srctag}/${srctag}.tar.gz" \
   --arg pkgbuild_commit "$pkgbuild_sha" \
@@ -130,7 +135,7 @@ jq -n \
   --slurpfile terra "$out/terra.json" \
   '{
     channel: $channel, variant: $variant, kver: $kver, build_id: $build_id,
-    kernel: {version: $kernel_version, major: $kernel_major, tagrel: $tagrel, srctag: $srctag,
+    kernel: {version: $kernel_version, major: $kernel_major, tagrel: $tagrel, rpm_release: $krelease, srctag: $srctag,
              source_url: $source_url, pkgbuild_commit: $pkgbuild_commit, pkgbuild_date: $pkgbuild_date,
              pkgbuild_url: $pkgbuild_url, config_sha256: $config_sha256, patchsource: $patchsource,
              knobs: $pkgbuild[0].knobs, kernel_patches: $pkgbuild[0].kernel_patches,

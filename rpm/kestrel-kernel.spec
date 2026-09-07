@@ -1,13 +1,13 @@
 # kestrel-kernel: CachyOS kernel built for Fedora bootc images.
 #
-# All content is prepared by scripts/package.sh in %{kestrel_stage}; this spec
+# All content is prepared by scripts/package.sh in the staging root (macro kestrel_stage); this spec
 # only wraps the tree. No scriptlets: kestrel-install runs depmod and dracut.
 #
 # Macros passed on the rpmbuild command line:
 #   kestrel_stage   staging root with the final file tree
-#   kver            kernel release string, e.g. 7.2.3-2-cachyos
+#   kver            uname -r, e.g. 7.2.3-2.cachyos.fc44.x86_64 (= %{version}-%{release}.%{arch})
 #   kversion        upstream version, e.g. 7.2.3
-#   krelease        RPM release, e.g. 2.kestrel.fc44
+#   krelease        RPM release, e.g. 2.cachyos.fc44
 #   channel         stable or lts
 #   filelist_core   file list for the main package
 #   filelist_devel  file list for the devel package

@@ -64,8 +64,8 @@ jobs:
         run: |
           podman run --rm --security-opt label=disable -v "$PWD:/repo" -w /repo localhost/kestrel-builder:smoke bash -c '
             set -e
-            rpmspec -q --define "kestrel_stage /tmp" --define "kver 0.0.0-0-cachyos" --define "kversion 0.0.0" --define "krelease 0.kestrel.fc44" --define "channel stable" --define "filelist_core /dev/null" --define "filelist_devel /dev/null" --define "dist .fc44" rpm/kestrel-kernel.spec
-            rpmspec -q --define "kestrel_stage /tmp" --define "kver 0.0.0-0-cachyos" --define "nvver 0.0" --define "nvrelease 0.kestrel.fc44" --define "channel stable" --define "filelist /dev/null" --define "dist .fc44" rpm/kestrel-nvidia-kmod.spec
+            rpmspec -q --define "kestrel_stage /tmp" --define "kver 0.0.0-0.cachyos.fc44.x86_64" --define "kversion 0.0.0" --define "krelease 0.cachyos.fc44" --define "channel stable" --define "filelist_core /dev/null" --define "filelist_devel /dev/null" --define "dist .fc44" rpm/kestrel-kernel.spec
+            rpmspec -q --define "kestrel_stage /tmp" --define "kver 0.0.0-0.cachyos.fc44.x86_64" --define "nvver 0.0" --define "nvrelease 0.kestrel.fc44" --define "channel stable" --define "filelist /dev/null" --define "dist .fc44" rpm/kestrel-nvidia-kmod.spec
           '
       - name: Reference Containerfile syntax (no kestrel yet, dry parse only)
         run: |

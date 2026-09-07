@@ -55,8 +55,12 @@ module.sig_enforce=1` through `/usr/lib/bootc/kargs.d/`.
 | `/usr/share/kestrel/RPM-GPG-KEY-kestrel` | OpenPGP key that signed the RPMs |
 | `/usr/share/kestrel/LICENSES/` | GPL-2.0 (kernel), MIT and GPL-2.0 (NVIDIA modules), Apache-2.0 (kestrel) |
 
-`kver` looks like `7.2.3-2-cachyos` or `6.18.48-2-cachyos-lts`: CachyOS
-version, CachyOS tag release, variant suffix. This is what `uname -r` prints.
+`kver` looks like `7.2.3-2.cachyos.fc44.x86_64` or
+`6.18.48-2.cachyos.lts.fc44.x86_64`: CachyOS version and tag release, variant,
+Fedora release, arch. This is what `uname -r` prints, and it is also
+`%{VERSION}-%{RELEASE}.%{ARCH}` of the `kestrel-kernel` RPM, the same shape
+Fedora's kernel has, so tooling that derives `kernel-uname-r` from the RPM
+works unchanged.
 
 ## Tags
 
@@ -64,7 +68,7 @@ version, CachyOS tag release, variant suffix. This is what `uname -r` prints.
 | --- | --- |
 | `stable`, `lts` | floating, the newest green build of the channel |
 | `stable-7.2.3-2-610.57.04` | immutable pin: kernel tag and NVIDIA version |
-| `stable-7.2.3-2-cachyos` | immutable pin: kver |
+| `stable-7.2.3-2.cachyos.fc44.x86_64` | immutable pin: kver |
 | `stable-7.2.3-2` | last build for that kernel tag (moves when NVIDIA changes) |
 | `stable-fc44` | last build for that Fedora release |
 
