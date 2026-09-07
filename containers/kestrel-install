@@ -192,9 +192,11 @@ if [[ $do_initramfs -eq 1 ]]; then
   dracut --no-hostonly --kver "$kver" --reproducible --zstd "${add[@]}" \
     -f "/usr/lib/modules/$kver/initramfs.img" >/tmp/kestrel-dracut.log 2>&1 \
     || { tail -30 /tmp/kestrel-dracut.log >&2; die "dracut failed"; }
-  if compgen -G "/usr/lib/dracut/modules.d/[0-9][0-9]ostree" >/dev/null && command -v lsinitrd >/dev/null \
-     && ! lsinitrd "/usr/lib/modules/$kver/initramfs.img" 2>/dev/null | grep -q 'ostree-prepare-root'; then
-    die "initramfs lacks ostree-prepare-root although the ostree dracut module is installed"
+  if compgen -G "/usr/lib/dracut/modules.d/[0-9][0-9]ostree" >/dev/null && command -v lsinitrd >/dev/null; then
+    lsinitrd "/usr/lib/modules/$kver/initramfs.img" >/tmp/kestrel-lsinitrd.txt 2>/dev/null || true
+    grep -q 'ostree-prepare-root' /tmp/kestrel-lsinitrd.txt \
+      || die "initramfs lacks ostree-prepare-root although the ostree dracut module is installed"
+    rm -f /tmp/kestrel-lsinitrd.txt
   fi
   chmod 0600 "/usr/lib/modules/$kver/initramfs.img"
   rm -f /tmp/kestrel-dracut.log
